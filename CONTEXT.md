@@ -40,6 +40,11 @@ _Avoid_: timestamp, position time, observed at
 Two or more Position Reports sharing an MMSI and a Reported Time but disagreeing about
 position. Kept, not resolved — the system records observations rather than adjudicating them.
 
+**Navigational Status**:
+What a Vessel reports itself to be doing - under way, at anchor, moored, aground. Self-declared
+and therefore only as reliable as the crew setting it.
+_Avoid_: status, state, nav status
+
 **Course**:
 The direction a vessel is actually travelling over the ground. Distinct from Heading.
 _Avoid_: bearing, direction, COG

@@ -10,6 +10,7 @@ import argparse
 import json
 import logging
 import time
+from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,20 @@ def _json_default(value: Any) -> float:
     if isinstance(value, Decimal):
         return float(value)
     raise TypeError(f"cannot serialise {type(value).__name__}")
+
+
+def encode(message: Mapping[str, Any]) -> bytes:
+    """The exact bytes this producer puts on the topic.
+
+    Incremental JSON parsing yields Decimal for the coordinate fields, which JSON
+    cannot represent; they cross the wire as numbers.
+    """
+    return json.dumps(message, default=_json_default).encode()
+
+
+def partition_key(message: Mapping[str, Any]) -> bytes:
+    """One Vessel's reports share a key, so they stay ordered within a partition."""
+    return str(message["mmsi"]).encode()
 
 
 def main() -> None:
@@ -54,8 +69,8 @@ def main() -> None:
     for message in read_feed(args.feed):
         producer.produce(
             settings.kafka_topic,
-            key=str(message["mmsi"]).encode(),
-            value=json.dumps(message, default=_json_default).encode(),
+            key=partition_key(message),
+            value=encode(message),
         )
         producer.poll(0)
         published += 1

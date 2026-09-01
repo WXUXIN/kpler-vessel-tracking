@@ -1,23 +1,28 @@
 name: vessel-tracking
 
+# Every value is overridable from a .env file, which Compose loads automatically;
+# the defaults here are what makes `docker compose up` work with no setup at all.
+# See .env.example for the full set.
 x-app-env: &app-env
-  VT_DATABASE_URL: postgresql://vessel:vessel@postgres:5432/vessel_tracking
-  VT_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-  VT_KAFKA_TOPIC: ais.position-reports
-  VT_KAFKA_CONSUMER_GROUP: vessel-tracking
+  VT_DATABASE_URL: ${VT_DATABASE_URL:-postgresql://vessel:vessel@postgres:5432/vessel_tracking}
+  VT_KAFKA_BOOTSTRAP_SERVERS: ${VT_KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+  VT_KAFKA_TOPIC: ${VT_KAFKA_TOPIC:-ais.position-reports}
+  VT_KAFKA_CONSUMER_GROUP: ${VT_KAFKA_CONSUMER_GROUP:-vessel-tracking}
+  VT_FEED_PATH: ${VT_FEED_PATH:-ship_positions.json}
+  VT_PRODUCER_RATE: ${VT_PRODUCER_RATE:-200}
 
 services:
   postgres:
     image: postgis/postgis:16-3.4
     environment:
-      POSTGRES_USER: vessel
-      POSTGRES_PASSWORD: vessel
-      POSTGRES_DB: vessel_tracking
+      POSTGRES_USER: ${VT_POSTGRES_USER:-vessel}
+      POSTGRES_PASSWORD: ${VT_POSTGRES_PASSWORD:-vessel}
+      POSTGRES_DB: ${VT_POSTGRES_DB:-vessel_tracking}
     ports: ["5432:5432"]
     volumes:
       - ./db/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U vessel -d vessel_tracking"]
+      test: ["CMD-SHELL", "pg_isready -U ${VT_POSTGRES_USER:-vessel} -d ${VT_POSTGRES_DB:-vessel_tracking}"]
       interval: 5s
       timeout: 5s
       retries: 20

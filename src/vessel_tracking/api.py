@@ -13,9 +13,10 @@ from vessel_tracking.domain import PositionReport
 from vessel_tracking.settings import Settings
 from vessel_tracking.store import PositionReportStore
 
-# The tracer bullet serves the whole collection. Keyset paging replaces this cap in
-# its own ticket; the cap exists so an unbounded query cannot exhaust memory today.
-TRACER_LIMIT = 100_000
+# Serving the whole collection is safe only because a cap bounds it. Keyset paging
+# replaces the cap in its own ticket; until then this is what stops an unbounded
+# query exhausting memory.
+MAX_RESULT_SIZE = 100_000
 
 
 class PositionReportResource(BaseModel):
@@ -78,8 +79,8 @@ def create_app(store: PositionReportStore | None = None) -> FastAPI:
     )
 
     @app.get("/v1/positions", response_model=PositionReportPage)
-    def list_positions(request: Request) -> PositionReportPage:
-        reports = request.app.state.store.list_reports(TRACER_LIMIT)
+    def list_position_reports(request: Request) -> PositionReportPage:
+        reports = request.app.state.store.list_reports(MAX_RESULT_SIZE)
         return PositionReportPage(
             items=[PositionReportResource.of(report) for report in reports]
         )

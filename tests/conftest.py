@@ -1,11 +1,15 @@
+import json
 import pathlib
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from typing import Any, Callable
 
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
 from testcontainers.postgres import PostgresContainer
 
+from vessel_tracking.feed import read_feed
+from vessel_tracking.producer import encode
 from vessel_tracking.store import PositionReportStore
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -31,6 +35,24 @@ def dsn() -> Iterator[str]:
 @pytest.fixture
 def feed_path() -> pathlib.Path:
     return ROOT / "ship_positions.json"
+
+
+@pytest.fixture
+def published_stream(
+    feed_path: pathlib.Path,
+) -> Callable[[], Iterator[Mapping[str, Any]]]:
+    """The producer's message stream, as the consumer receives it.
+
+    Faking the broker means standing in for the topic, not for the wire format:
+    incremental JSON parsing yields Decimal coordinates, and only the producer's
+    serialisation turns them into the numbers the real path carries.
+    """
+
+    def stream() -> Iterator[Mapping[str, Any]]:
+        for message in read_feed(feed_path):
+            yield json.loads(encode(message))
+
+    return stream
 
 
 @pytest.fixture

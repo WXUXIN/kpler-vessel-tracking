@@ -1,7 +1,8 @@
 """The ingest seam: raw messages in, Position Reports written, counts reported.
 
-The consumer feeds this from the broker; the ingest seam tests feed it from the feed
-reader directly, which is what "faked broker" means here.
+The consumer drives BatchWriter from the broker; the ingest seam tests drive the same
+BatchWriter from the producer's message stream, which is what "faked broker" means.
+Both paths share this code, so the seam tests cover what the consumer actually runs.
 """
 
 from __future__ import annotations
@@ -19,7 +20,41 @@ DEFAULT_BATCH_SIZE = 500
 @dataclass(frozen=True, slots=True)
 class IngestResult:
     written: int
-    rejected: int = 0
+
+
+class BatchWriter:
+    """Accumulates Position Reports and writes them in bounded batches.
+
+    Adding flushes automatically once the batch is full; callers that also want a time
+    bound call flush() themselves.
+    """
+
+    def __init__(
+        self, store: PositionReportStore, batch_size: int = DEFAULT_BATCH_SIZE
+    ) -> None:
+        self._store = store
+        self._batch_size = batch_size
+        self._batch: list[PositionReport] = []
+        self._written = 0
+
+    @property
+    def written(self) -> int:
+        return self._written
+
+    def add(self, message: Mapping[str, Any]) -> int:
+        self._batch.append(from_message(message))
+        if len(self._batch) >= self._batch_size:
+            return self.flush()
+        return 0
+
+    def flush(self) -> int:
+        """Write the pending batch in one transaction. Returns rows added by this call."""
+        if not self._batch:
+            return 0
+        added = self._store.insert_many(self._batch)
+        self._batch = []
+        self._written += added
+        return added
 
 
 def ingest_messages(
@@ -27,12 +62,8 @@ def ingest_messages(
     store: PositionReportStore,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> IngestResult:
-    written = 0
-    batch: list[PositionReport] = []
+    writer = BatchWriter(store, batch_size)
     for message in messages:
-        batch.append(from_message(message))
-        if len(batch) >= batch_size:
-            written += store.insert_many(batch)
-            batch.clear()
-    written += store.insert_many(batch)
-    return IngestResult(written=written)
+        writer.add(message)
+    writer.flush()
+    return IngestResult(written=writer.written)

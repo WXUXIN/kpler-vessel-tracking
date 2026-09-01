@@ -10,13 +10,12 @@ from types import FrameType
 
 from confluent_kafka import Consumer, KafkaError
 
-from vessel_tracking.domain import PositionReport, from_message
+from vessel_tracking.ingest import BatchWriter
 from vessel_tracking.settings import Settings
 from vessel_tracking.store import PositionReportStore
 
 log = logging.getLogger("vessel_tracking.consumer")
 
-BATCH_SIZE = 500
 BATCH_SECONDS = 1.0
 
 _running = True
@@ -34,6 +33,10 @@ def main() -> None:
 
     settings = Settings()
     store = PositionReportStore(settings.database_url)
+    # Offsets are auto-committed here. ADR-0004 requires them committed manually,
+    # after the database transaction; that arrives with issue #4, which owns it, along
+    # with the dead-letter and retry paths. Until then this consumer can lose a batch
+    # on an unclean shutdown.
     consumer = Consumer(
         {
             "bootstrap.servers": settings.kafka_bootstrap_servers,
@@ -43,16 +46,13 @@ def main() -> None:
     )
     consumer.subscribe([settings.kafka_topic])
 
-    written = 0
-    batch: list[PositionReport] = []
+    writer = BatchWriter(store)
     deadline = time.monotonic() + BATCH_SECONDS
 
     def flush() -> None:
-        nonlocal written, batch, deadline
-        if batch:
-            written += store.insert_many(batch)
-            batch = []
-            log.info(json.dumps({"event": "ingest_progress", "written": written}))
+        nonlocal deadline
+        if writer.flush():
+            log.info(json.dumps({"event": "ingest_progress", "written": writer.written}))
         deadline = time.monotonic() + BATCH_SECONDS
 
     try:
@@ -72,11 +72,15 @@ def main() -> None:
             payload = message.value()
             if payload is None:
                 continue
-            batch.append(from_message(json.loads(payload)))
-            if len(batch) >= BATCH_SIZE or time.monotonic() >= deadline:
+            if writer.add(json.loads(payload)):
+                log.info(
+                    json.dumps({"event": "ingest_progress", "written": writer.written})
+                )
+                deadline = time.monotonic() + BATCH_SECONDS
+            elif time.monotonic() >= deadline:
                 flush()
     finally:
         flush()
         consumer.close()
         store.close()
-        log.info(json.dumps({"event": "ingest_summary", "written": written}))
+        log.info(json.dumps({"event": "ingest_summary", "written": writer.written}))

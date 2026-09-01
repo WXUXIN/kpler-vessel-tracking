@@ -31,6 +31,15 @@ def _compose(*args: str, timeout: int = 600) -> subprocess.CompletedProcess[str]
     )
 
 
+def _stored_report_count() -> int:
+    result = _compose(
+        "exec", "-T", "postgres",
+        "psql", "-U", "vessel", "-d", "vessel_tracking",
+        "-tAc", "SELECT count(*) FROM position_report",
+    )
+    return int(result.stdout.strip())
+
+
 def _served_report_count() -> int:
     with urllib.request.urlopen(API, timeout=30) as response:
         return len(json.load(response)["items"])
@@ -60,4 +69,5 @@ def test_the_feed_travels_end_to_end(pipeline: None) -> None:
             break
         time.sleep(2)
 
+    assert _stored_report_count() == FEED_SIZE
     assert served == FEED_SIZE
