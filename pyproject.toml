@@ -1,0 +1,47 @@
+[project]
+name = "vessel-tracking"
+version = "0.1.0"
+description = "Streaming AIS ingestion pipeline and filtered Position Report API"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "psycopg[binary,pool]>=3.2",
+    "confluent-kafka>=2.6",
+    "ijson>=3.3",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.28",
+    "testcontainers[postgres]>=4.8",
+    "mypy>=1.13",
+]
+
+[project.scripts]
+vt-producer = "vessel_tracking.producer:main"
+vt-consumer = "vessel_tracking.consumer:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["compose: end-to-end test requiring docker compose (deselect with -m 'not compose')"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["vessel_tracking"]
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["ijson.*"]
+ignore_missing_imports = true
