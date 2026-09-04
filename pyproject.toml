@@ -22,6 +22,16 @@ dev = [
     "mypy>=1.13",
 ]
 
+# Only needed to run analysis/explore_feed.ipynb. The markdown generator,
+# analysis/explore_feed.py, is standard library only and needs none of this.
+analysis = [
+    "matplotlib>=3.9",
+    "pandas>=2.2",
+    "nbformat>=5.10",
+    "nbclient>=0.10",
+    "ipykernel>=6.29",
+]
+
 [project.scripts]
 vt-producer = "vessel_tracking.producer:main"
 vt-consumer = "vessel_tracking.consumer:main"

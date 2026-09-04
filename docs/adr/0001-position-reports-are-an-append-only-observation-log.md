@@ -16,7 +16,8 @@ apart. Last-write-wins would have silently discarded 2,351 records, 87% of the f
 the ingest counter reported every record written.
 
 The figures above are reproduced by `analysis/explore_feed.py`; see
-`docs/dataset-observations.md`.
+`docs/dataset-observations.md` for the text version, or `analysis/explore_feed.ipynb`
+for the same analysis with the track plots that make the ordering finding visible.
 
 ## Consequences
 
