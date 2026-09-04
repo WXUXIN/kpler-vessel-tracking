@@ -15,7 +15,7 @@ import urllib.request
 import pytest
 
 FEED_SIZE = 2696
-API = "http://localhost:8000/v1/positions"
+API = "http://localhost:8000/v1/position-reports"
 INGEST_TIMEOUT_SECONDS = 180
 
 pytestmark = pytest.mark.compose

@@ -78,7 +78,11 @@ def create_app(store: PositionReportStore | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
-    @app.get("/v1/positions", response_model=PositionReportPage)
+    # The resource is a Position Report, not a position: it records what arrived from
+    # AIS, never where a Vessel was. CONTEXT.md puts "position" on the avoid list for
+    # exactly that reason, so the conventional-looking /v1/positions would assert
+    # something the data cannot support.
+    @app.get("/v1/position-reports", response_model=PositionReportPage)
     def list_position_reports(request: Request) -> PositionReportPage:
         reports = request.app.state.store.list_reports(MAX_RESULT_SIZE)
         return PositionReportPage(
