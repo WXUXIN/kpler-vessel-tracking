@@ -8,10 +8,15 @@ and full replay safe without deduplication logic.
 
 ## Considered Options
 
-Keying on `(mmsi, reported_time)` was the obvious alternative and is wrong here: 142 such
-pairs in the source data carry *conflicting* positions — the same vessel, the same second,
-up to 515 km apart, with zero exact duplicates among them. Last-write-wins would have
-silently discarded 5% of the data while the ingest counter reported every record written.
+Keying on `(mmsi, reported_time)` was the obvious alternative and is wrong here. The source
+data holds only 345 distinct such pairs across 2,696 records; 142 of those keys carry more
+than one report, none of them an exact duplicate, and the busiest single key carries 119.
+Where they disagree they disagree wildly — the same vessel, the same second, up to 515 km
+apart. Last-write-wins would have silently discarded 2,351 records, 87% of the feed, while
+the ingest counter reported every record written.
+
+The figures above are reproduced by `analysis/explore_feed.py`; see
+`docs/dataset-observations.md`.
 
 ## Consequences
 
