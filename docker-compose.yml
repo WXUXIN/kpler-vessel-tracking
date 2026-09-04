@@ -7,6 +7,7 @@ x-app-env: &app-env
   VT_DATABASE_URL: ${VT_DATABASE_URL:-postgresql://vessel:vessel@postgres:5432/vessel_tracking}
   VT_KAFKA_BOOTSTRAP_SERVERS: ${VT_KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
   VT_KAFKA_TOPIC: ${VT_KAFKA_TOPIC:-ais.position-reports}
+  VT_KAFKA_DEAD_LETTER_TOPIC: ${VT_KAFKA_DEAD_LETTER_TOPIC:-ais.position-reports.dead-letter}
   VT_KAFKA_CONSUMER_GROUP: ${VT_KAFKA_CONSUMER_GROUP:-vessel-tracking}
   VT_FEED_PATH: ${VT_FEED_PATH:-ship_positions.json}
   VT_PRODUCER_RATE: ${VT_PRODUCER_RATE:-200}

@@ -8,8 +8,8 @@ import pytest
 from fastapi.testclient import TestClient
 from testcontainers.postgres import PostgresContainer
 
-from vessel_tracking.feed import read_feed
-from vessel_tracking.producer import encode
+from vessel_tracking.domain import RejectedReport
+from vessel_tracking.producer import encode, messages_to_publish
 from vessel_tracking.store import PositionReportStore
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -40,19 +40,44 @@ def feed_path() -> pathlib.Path:
 @pytest.fixture
 def published_stream(
     feed_path: pathlib.Path,
-) -> Callable[[], Iterator[Mapping[str, Any]]]:
+) -> Callable[..., Iterator[Mapping[str, Any]]]:
     """The producer's message stream, as the consumer receives it.
 
     Faking the broker means standing in for the topic, not for the wire format:
     incremental JSON parsing yields Decimal coordinates, and only the producer's
-    serialisation turns them into the numbers the real path carries.
+    serialisation turns them into the numbers the real path carries. The stream comes
+    from the producer's own function, injection option included, so the seam tests
+    cover what the producer actually publishes.
     """
 
-    def stream() -> Iterator[Mapping[str, Any]]:
-        for message in read_feed(feed_path):
+    def stream(inject_invalid: int = 0) -> Iterator[Mapping[str, Any]]:
+        for message in messages_to_publish(feed_path, inject_invalid):
             yield json.loads(encode(message))
 
     return stream
+
+
+class RecordingDeadLetters:
+    """Stands in for the dead-letter topic.
+
+    Faking the broker here means keeping what was published to it, so a test can
+    assert on dead-letter contents the way an operator would read the topic.
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[RejectedReport] = []
+
+    def send(self, rejected: RejectedReport) -> None:
+        self.sent.append(rejected)
+
+    @property
+    def reasons(self) -> list[str]:
+        return [rejected.reason for rejected in self.sent]
+
+
+@pytest.fixture
+def dead_letters() -> RecordingDeadLetters:
+    return RecordingDeadLetters()
 
 
 @pytest.fixture

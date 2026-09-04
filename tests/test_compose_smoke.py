@@ -49,6 +49,9 @@ def _served_report_count() -> int:
 def pipeline() -> Iterator[None]:
     _compose("down", "-v")
     _compose("up", "-d", "--build", "--wait")
+    # The producer is a profiled job rather than a service, so `up --build` does not
+    # rebuild it. Without this the test can run a stale producer against fresh services.
+    _compose("build", "producer")
     yield
     _compose("down", "-v")
 
