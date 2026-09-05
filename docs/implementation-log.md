@@ -14,6 +14,49 @@ Append new entries directly below this line.
 
 ---
 
+## Endpoint reference in `docs/api.md`
+
+`feat/documentation` · 2026-09-05 · docs only
+
+Not a ticket. Asked for directly: endpoint documentation in the style of the Stripe
+reference kept at `example_api.md`.
+
+### Done
+
+- `docs/api.md` follows that reference's structure - title, prose, prerequisites,
+  request, response, returns, parameters - and adds the sections this endpoint needs that
+  a Stripe charge does not: content negotiation, and every error shape.
+- Linked from the README's reference list and from its API section.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `docs/api.md` | +285 | The endpoint reference |
+| `README.md` | +4 −2 | Links to it from the two places a reader would look |
+
+### Verified
+
+- **Every response in it was captured from the running system**, not written by hand: the
+  JSON page, the CSV rows, both 422 documents, and the 429 with its headers. The stack
+  was brought up, the feed replayed, and each request made.
+- Every link resolves.
+
+### Take note
+
+- **One captured response documents a rough edge.** Asking with both an out-of-range
+  bound and an incomplete circle returns only the bound: rules about individual
+  parameters are checked before rules about the whole request, so a caller breaking both
+  is told about one, fixes it, and only then learns about the other. That is pydantic's
+  ordering rather than a decision, and the documentation says so plainly rather than
+  showing a tidier example that hides it.
+- The file is `docs/api.md`, chosen rather than asked for. `example_api.md` is the style
+  reference and is left untouched.
+- No ADR, no code change, no test. The endpoint's behaviour is unchanged; this describes
+  what the HTTP seam already asserts.
+
+---
+
 ## #12 — Documentation: README, design decisions, and dataset observations
 
 `feat/documentation` · 2026-09-05 · 73 tests passing · 4 files, +420 −5
