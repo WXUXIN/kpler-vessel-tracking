@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-from vessel_tracking.api import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+from vessel_tracking.api import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, create_app
 
 FEED_SIZE = 2696
 
@@ -314,3 +314,109 @@ def test_a_last_page_that_is_exactly_full_still_ends_the_paging(
 
     assert sizes == [79] * 11  # 869 = 11 x 79, so every page is full, including the last
     assert sum(sizes) == REPORTS_PER_VESSEL[NORTHERN_VESSEL]
+
+
+def problem(response: Any, status: int) -> dict[str, Any]:
+    """Assert the one error shape, and hand back the document for closer inspection."""
+    assert response.status_code == status
+    assert response.headers["content-type"].startswith("application/problem+json")
+    body = response.json()
+    assert body["status"] == status
+    assert body["title"]
+    assert body["type"]
+    assert body["instance"]
+    return body
+
+
+def test_an_invalid_parameter_returns_a_problem_document(client: TestClient) -> None:
+    """One shape, not the framework's native one alongside it."""
+    document = problem(
+        client.get("/v1/position-reports", params={"limit": MAX_PAGE_SIZE + 1}), 422
+    )
+
+    assert document["errors"][0]["parameter"] == "limit"
+    assert isinstance(document["detail"], str)  # prose here, structure in `errors`
+
+
+def test_the_problem_document_names_the_bound_that_was_wrong(
+    client: TestClient,
+) -> None:
+    """Four separately named bounds exist so that this answer can be given."""
+    document = problem(
+        client.get(
+            "/v1/position-reports",
+            params={"min_latitude": 100, "max_longitude": 999},
+        ),
+        422,
+    )
+
+    named = {error["parameter"] for error in document["errors"]}
+    assert named == {"min_latitude", "max_longitude"}
+    assert all(error["detail"] for error in document["errors"])
+
+
+def test_an_unknown_path_returns_the_same_problem_shape(client: TestClient) -> None:
+    """A caller handling errors programmatically meets one format, not two."""
+    document = problem(client.get("/v1/no-such-collection"), 404)
+
+    assert "errors" not in document
+
+
+def test_a_failure_inside_the_api_returns_the_same_problem_shape() -> None:
+    """Server failures use the same document, and leak nothing about the cause."""
+
+    class BrokenStore:
+        def list_reports(self, *args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("password=hunter2 at 10.0.0.4")
+
+    with TestClient(create_app(BrokenStore()), raise_server_exceptions=False) as broken:
+        response = broken.get("/v1/position-reports")
+
+    document = problem(response, 500)
+    assert "hunter2" not in response.text
+
+
+def test_the_utc_assumption_is_documented(client: TestClient) -> None:
+    """Documented rather than silent: a caller reads it where they pass the bound."""
+    schema = client.get("/openapi.json").json()
+    endpoint = schema["paths"]["/v1/position-reports"]["get"]
+    described = " ".join(
+        parameter.get("description", "")
+        for parameter in endpoint["parameters"]
+        if parameter["name"].startswith("reported_")
+    )
+
+    assert "UTC" in described
+
+
+def test_a_bad_value_in_a_repeated_parameter_names_the_parameter(
+    client: TestClient,
+) -> None:
+    """Not the position it sat at: a caller cannot fix a parameter called "0"."""
+    document = problem(client.get("/v1/position-reports", params={"mmsi": "abc"}), 422)
+
+    assert [error["parameter"] for error in document["errors"]] == ["mmsi"]
+
+
+def test_the_wrong_method_keeps_the_headers_the_status_requires(
+    client: TestClient,
+) -> None:
+    """One shape everywhere, but not at the cost of a header the RFC requires."""
+    response = client.post("/v1/position-reports")
+
+    problem(response, 405)
+    assert "GET" in response.headers["allow"]
+
+
+def test_the_published_schema_offers_only_the_problem_media_type(
+    client: TestClient,
+) -> None:
+    """A generated client should expect what the wire returns, and nothing else."""
+    responses = client.get("/openapi.json").json()["paths"]["/v1/position-reports"][
+        "get"
+    ]["responses"]
+
+    for status in ("422", "500"):
+        content = responses[status]["content"]
+        assert list(content) == ["application/problem+json"]
+        assert content["application/problem+json"]["schema"]["$ref"].endswith("/Problem")

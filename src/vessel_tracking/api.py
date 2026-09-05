@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+import logging
+
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Annotated
+from http import HTTPStatus
+from typing import Annotated, Any
 
 from fastapi import FastAPI, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.openapi.utils import get_openapi
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from vessel_tracking.domain import PositionReport
 from vessel_tracking.settings import Settings
 from vessel_tracking.store import PositionReportStore, ReportFilter
+
+log = logging.getLogger("vessel_tracking.api")
 
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 1000
@@ -30,6 +39,89 @@ group of equal Reported Times has no defined place to resume from.
 
 Report ID ascends strictly in receipt order, which makes it both the honest ordering and
 a cursor that cannot drift."""
+
+
+# RFC 9457. One shape for every failure, because two error formats are worse than one:
+# a caller who has to branch on which one arrived is not being handled programmatically.
+PROBLEM_MEDIA_TYPE = "application/problem+json"
+
+# A type is a URI *identifying* a problem, not a page to fetch. "about:blank" means the
+# problem is fully described by the status code; anything carrying extension members
+# gets its own, so a caller can tell from the type that `errors` will be there.
+BLANK_PROBLEM = "about:blank"
+INVALID_PARAMETERS = "/problems/invalid-parameters"
+
+
+# Declared on every route that can fail, so a generated client expects the shape the
+# wire actually returns rather than the framework's default.
+class InvalidParameter(BaseModel):
+    """One rejected query parameter, named so the caller knows which to fix."""
+
+    parameter: str
+    detail: str
+
+
+class Problem(BaseModel):
+    """An RFC 9457 problem document: the only error body this API returns."""
+
+    type: str = BLANK_PROBLEM
+    title: str
+    status: int
+    detail: str | None = None
+    instance: str | None = None
+    errors: list[InvalidParameter] | None = None
+
+
+PROBLEM_RESPONSE: dict[str, Any] = {
+    "model": Problem,
+    "description": "An RFC 9457 problem document.",
+    "content": {PROBLEM_MEDIA_TYPE: {}},
+}
+
+
+def _status_phrase(status: int) -> str:
+    """The IANA phrase for a status, or a plain title for a code that has none."""
+    try:
+        return HTTPStatus(status).phrase
+    except ValueError:
+        return "Error"
+
+
+def _occurrence(request: Request) -> str:
+    """What actually failed, not merely where.
+
+    RFC 9457 asks instance to identify the occurrence. The path alone is the same on
+    every rejected request to a collection; the query string is the part that varied.
+    """
+    query = request.url.query
+    return f"{request.url.path}?{query}" if query else request.url.path
+
+
+def _parameter_name(location: Sequence[Any]) -> str:
+    """The query parameter a caller can actually act on.
+
+    Pydantic locates a failure as ("query", "mmsi") for a scalar and
+    ("query", "mmsi", 0) for one bad value inside a repeated parameter. The name is what
+    the caller wrote; the trailing index is a position inside their own repetition, and
+    naming a parameter "0" back to them helps nobody.
+    """
+    return str(location[1]) if len(location) > 1 else str(location[0])
+
+
+def _problem_response(
+    problem: Problem, headers: Mapping[str, str] | None = None
+) -> JSONResponse:
+    """The document, plus whatever headers the status itself requires.
+
+    A 405 without Allow, or a 503 without Retry-After, is a worse answer than the
+    framework's default would have been (RFC 9110).
+    """
+    return JSONResponse(
+        status_code=problem.status,
+        media_type=PROBLEM_MEDIA_TYPE,
+        content=problem.model_dump(exclude_none=True),
+        headers=dict(headers) if headers else None,
+    )
 
 
 class PositionReportResource(BaseModel):
@@ -105,10 +197,12 @@ class ReportQuery(BaseModel):
         description="Repeat the parameter to ask about several Vessels.",
     )
     reported_from: datetime | None = Field(
-        None, description="Start of the interval, inclusive."
+        None,
+        description="Start of the interval, inclusive. A value without a timezone is read as UTC.",
     )
     reported_to: datetime | None = Field(
-        None, description="End of the interval, exclusive."
+        None,
+        description="End of the interval, exclusive. A value without a timezone is read as UTC.",
     )
     min_latitude: float | None = Field(None, ge=-90, le=90, description="Southern bound.")
     max_latitude: float | None = Field(None, ge=-90, le=90, description="Northern bound.")
@@ -146,9 +240,9 @@ class ReportQuery(BaseModel):
 def _as_utc(moment: datetime | None) -> datetime | None:
     """Read a bound without a timezone as UTC rather than as the server's local time.
 
-    Documenting the assumption, and the error contract around bad input, belongs to the
-    error ticket. Reading it consistently belongs here: a naive bound compared in some
-    other zone answers a question the caller did not ask.
+    A naive bound compared in some other zone answers a question the caller did not ask,
+    so ordinary ISO-8601 input works without timezone boilerplate. The assumption is
+    stated on both interval parameters, where a caller passes them.
     """
     if moment is None or moment.tzinfo is not None:
         return moment
@@ -178,6 +272,61 @@ def create_app(store: PositionReportStore | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
+    @app.exception_handler(RequestValidationError)
+    async def invalid_parameters(
+        request: Request, failure: RequestValidationError
+    ) -> JSONResponse:
+        """Validation detail inside the problem document, not beside it.
+
+        """
+        return _problem_response(
+            Problem(
+                type=INVALID_PARAMETERS,
+                title="Invalid parameters",
+                status=422,
+                detail="The request could not be understood as it stands.",
+                instance=_occurrence(request),
+                errors=[
+                    InvalidParameter(
+                        parameter=_parameter_name(error["loc"]),
+                        detail=str(error["msg"]),
+                    )
+                    for error in failure.errors()
+                ],
+            )
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_problem(
+        request: Request, failure: StarletteHTTPException
+    ) -> JSONResponse:
+        return _problem_response(
+            Problem(
+                title=_status_phrase(failure.status_code),
+                status=failure.status_code,
+                detail=str(failure.detail) if failure.detail else None,
+                instance=_occurrence(request),
+            ),
+            headers=failure.headers,
+        )
+
+    @app.exception_handler(Exception)
+    async def unhandled_problem(request: Request, failure: Exception) -> JSONResponse:
+        """The same document for a failure nobody anticipated.
+
+        The cause is logged rather than returned: a caller can do nothing with it, and a
+        stack trace or a connection string on the wire is a gift to the wrong reader.
+        """
+        log.exception("unhandled request failure", exc_info=failure)
+        return _problem_response(
+            Problem(
+                title=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
+                status=500,
+                detail="The request could not be served. The failure has been logged.",
+                instance=_occurrence(request),
+            )
+        )
+
     # The resource is a Position Report, not a position: it records what arrived from
     # AIS, never where a Vessel was. CONTEXT.md puts "position" on the avoid list for
     # exactly that reason, so the conventional-looking /v1/positions would assert
@@ -187,6 +336,10 @@ def create_app(store: PositionReportStore | None = None) -> FastAPI:
         response_model=PositionReportPage,
         summary="List Position Reports",
         description=ORDERING,
+        responses={
+            422: PROBLEM_RESPONSE,
+            500: PROBLEM_RESPONSE,
+        },
     )
     def list_position_reports(
         request: Request, query: Annotated[ReportQuery, Query()]
@@ -195,6 +348,32 @@ def create_app(store: PositionReportStore | None = None) -> FastAPI:
         # the datastore rather than guessed from a page that happens to look full.
         reports = request.app.state.store.list_reports(query.limit + 1, query.filters())
         return PositionReportPage.of(reports, query.limit)
+
+    def problem_only_openapi() -> dict[str, Any]:
+        """The generated document, saying only what these routes actually return.
+
+        Declaring a response `model` makes FastAPI advertise application/json. These
+        routes answer only with a problem document, and a schema promising both formats
+        is the very thing this error contract exists to remove - in the one artefact a
+        client is generated from.
+        """
+        if not app.openapi_schema:
+            schema = get_openapi(
+                title=app.title,
+                version=app.version,
+                summary=app.summary,
+                routes=app.routes,
+            )
+            for path in schema.get("paths", {}).values():
+                for operation in path.values():
+                    for response in operation.get("responses", {}).values():
+                        content = response.get("content", {})
+                        if PROBLEM_MEDIA_TYPE in content and "application/json" in content:
+                            content[PROBLEM_MEDIA_TYPE] = content.pop("application/json")
+            app.openapi_schema = schema
+        return app.openapi_schema
+
+    app.openapi = problem_only_openapi  # type: ignore[method-assign]
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:

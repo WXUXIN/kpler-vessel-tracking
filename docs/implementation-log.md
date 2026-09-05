@@ -14,6 +14,73 @@ Append new entries directly below this line.
 
 ---
 
+## #8 — RFC 9457 error contract and UTC input handling
+
+`feat/keyset-pagination` · 2026-09-05 · 54 tests passing · 2 files, +293 −8
+
+### Done
+
+- One problem document for every failure: validation, not found, wrong method, and
+  anything unhandled. `application/problem+json` on the wire.
+- Structured validation detail inside the document as an `errors` extension member, with
+  `detail` left as the RFC's human-readable prose rather than a competing structure.
+- Each rejected parameter names itself, which is what the four separately named bounds
+  were for.
+- A bound without a timezone is read as UTC, and the assumption is stated on both
+  interval parameters, where a caller passes them.
+- The 500 document says nothing about the cause; the cause goes to the log.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `src/vessel_tracking/api.py` | +186 −7 | `Problem`, three exception handlers, the OpenAPI prune, header pass-through |
+| `tests/test_http_seam.py` | +107 −1 | Each failure mode, the repeated-parameter case, the published schema |
+
+### Verified
+
+- Full suite 54 passed, mypy strict clean, `git diff --check` clean.
+- Probed by hand: unknown path, wrong method, malformed query syntax, out-of-range
+  bound, bad value inside a repeated parameter, and an unhandled store failure. All
+  return the same document.
+
+### Review caught
+
+- **The document named the wrong thing for repeated parameters.** Pydantic locates a bad
+  list item as `("query", "mmsi", 0)`, and taking the last element told the caller to fix
+  a parameter called `"0"`. My tests only ever passed bad scalars, so the bug survived
+  them. Found by the reviewer running the app rather than reading it.
+- **The published schema advertised two formats — inside the ticket whose whole purpose
+  is to have one.** Declaring a response `model` makes FastAPI add an `application/json`
+  entry, and it carried the `Problem` schema while the media type actually returned
+  carried none. A client generated from that document would have expected the wrong one.
+- **405 lost its `Allow` header.** The handler dropped `failure.headers`, which Starlette's
+  default forwards. One shape everywhere is not worth breaking RFC 9110 for.
+- `HTTPStatus(code).phrase` raises on any non-IANA status, so a handler bug would have
+  surfaced as a 500 from inside the error handler.
+- `instance` was the path, identical on every rejected request to the collection. It now
+  carries the query string — the part that actually varied.
+- **A tautological assertion**, `"detail" not in document or isinstance(...)`, which could
+  not fail. The #5 entry records the review catching this same class of thing; that is
+  twice now, and both times in an assertion I wrote to look thorough.
+- A stale docstring on `_as_utc` still said this work belonged to a later ticket.
+
+### Take note
+
+- **Two failure modes still escape the contract, both latent.** A failure raised in the
+  lifespan produces no ASGI response at all, so no document is possible - unavoidable. A
+  failure *part way through a streaming response* sends 200 with a truncated body and no
+  document, because the status has already gone. There is no streaming endpoint today,
+  but **#7 adds one**: CSV streamed from a server-side cursor. Worth deciding there what
+  a mid-stream failure should look like.
+- **Unhandled failures are logged twice** under uvicorn: once by `log.exception` with the
+  request path, once by Starlette re-raising afterwards. Kept the contextual one.
+- No ADR. The spec already records RFC 9457 as the decision, and a second copy would only
+  be a second thing to keep in step - the same reasoning as the glossary entry.
+- `_as_utc` is now properly this ticket's, closing the item #5 and #6 both carried.
+
+---
+
 ## Glossary — the six "missing" terms, and the one that was actually missing
 
 `feat/keyset-pagination` · 2026-09-05 · docs only
