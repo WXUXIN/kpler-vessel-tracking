@@ -8,4 +8,5 @@ FROM python:3.11-slim
 WORKDIR /app
 COPY --from=build /install /usr/local
 COPY ship_positions.json ./
+COPY static ./static
 ENV PYTHONUNBUFFERED=1

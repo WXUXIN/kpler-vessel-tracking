@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Position Reports — Vessel Tracking Demo</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='13' font-size='13'%3E%E2%9A%93%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-title">
+      <h1>Position Reports</h1>
+      <p>Every control below issues a real request to <code>/v1/position-reports</code> — nothing here is mocked.</p>
+    </div>
+    <dl class="stats">
+      <div><dt>Reports</dt><dd>2,696</dd></div>
+      <div><dt>Vessels</dt><dd>3</dd></div>
+      <div><dt>Span</dt><dd>18.2 h</dd></div>
+      <div><dt>(mmsi, timestamp) collisions</dt><dd>87%</dd></div>
+    </dl>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="panel">
+        <h2>Vessels</h2>
+        <div id="vessel-list" class="vessel-list"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Time window</h2>
+        <label>From <input type="datetime-local" id="reported-from" step="60"></label>
+        <label>To <input type="datetime-local" id="reported-to" step="60"></label>
+        <div class="preset-row">
+          <button type="button" class="chip" data-preset="full">Full range</button>
+          <button type="button" class="chip" data-preset="busy">Busiest minute (272 reports)</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Area</h2>
+        <div class="mode-row">
+          <label><input type="radio" name="spatial-mode" value="none" checked> None</label>
+          <label><input type="radio" name="spatial-mode" value="radius"> Radius (click map)</label>
+          <label><input type="radio" name="spatial-mode" value="bbox"> Bounding box</label>
+        </div>
+        <div id="radius-controls" class="sub-controls" hidden>
+          <p class="hint">Click the map to set the centre.</p>
+          <label>Radius: <span id="radius-value">100</span> nm
+            <input type="range" id="radius-slider" min="5" max="600" step="5" value="100">
+          </label>
+          <p class="hint" id="radius-centre">No centre set.</p>
+        </div>
+        <div id="bbox-controls" class="sub-controls" hidden>
+          <label>Min lat <input type="number" id="min-lat" step="0.01"></label>
+          <label>Max lat <input type="number" id="max-lat" step="0.01"></label>
+          <label>Min lon <input type="number" id="min-lon" step="0.01"></label>
+          <label>Max lon <input type="number" id="max-lon" step="0.01"></label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Paging</h2>
+        <label>Page size <input type="number" id="limit" value="50" min="1" max="1000"></label>
+      </section>
+
+      <div class="action-row">
+        <button type="button" id="run-query" class="primary">Search</button>
+        <button type="button" id="download-csv">Download CSV</button>
+      </div>
+
+      <section class="panel">
+        <h2>Track coherence</h2>
+        <p class="hint">
+          Ordering by Report ID gives a ~0.5&nbsp;km median hop between consecutive
+          points. Ordering by Reported Time — coarse, and shared across a wide area —
+          gives ~7–11&nbsp;km. Load one vessel's full track and compare.
+        </p>
+        <label>Vessel
+          <select id="track-vessel"></select>
+        </label>
+        <button type="button" id="load-track">Load full track</button>
+        <div class="mode-row" id="track-order-controls" hidden>
+          <label><input type="radio" name="track-order" value="report_id" checked> By Report ID</label>
+          <label><input type="radio" name="track-order" value="reported_at"> By Reported Time</label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Try it broken</h2>
+        <button type="button" id="trigger-error">Send an invalid query</button>
+        <button type="button" id="trigger-rate-limit">Simulate the rate limit</button>
+        <p class="hint">The second button fires 11 requests in a row and spends your quota for the next minute — that's the point.</p>
+      </section>
+    </aside>
+
+    <section class="stage">
+      <div id="map"></div>
+
+      <div class="telemetry" id="telemetry">
+        <span id="tele-status" class="tele-item">—</span>
+        <span id="tele-duration" class="tele-item">—</span>
+        <span id="tele-limit" class="tele-item">rate limit: not hit yet</span>
+        <span id="tele-reset" class="tele-item"></span>
+      </div>
+
+      <div class="problem-panel" id="problem-panel" hidden>
+        <div class="problem-head">
+          <h3 id="problem-title"></h3>
+          <button type="button" id="problem-close" aria-label="Dismiss">×</button>
+        </div>
+        <p id="problem-detail"></p>
+        <ul id="problem-errors"></ul>
+        <pre id="problem-raw"></pre>
+      </div>
+
+      <div class="results">
+        <table id="results-table">
+          <thead>
+            <tr>
+              <th>Report ID</th><th>MMSI</th><th>Reported at</th><th>Nav</th>
+              <th>Speed (kn)</th><th>Course</th><th>Heading</th><th>ROT</th>
+              <th>Lat</th><th>Lon</th>
+            </tr>
+          </thead>
+          <tbody id="results-body"></tbody>
+        </table>
+        <p id="results-empty" class="hint">Run a search to see Position Reports here.</p>
+        <button type="button" id="load-more" hidden>Load next page</button>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    Reference: <code>docs/api.md</code> in the repo · <a href="/docs">Swagger UI</a> · <a href="/openapi.json">OpenAPI schema</a>
+  </footer>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
