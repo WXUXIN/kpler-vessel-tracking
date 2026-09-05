@@ -14,6 +14,73 @@ Append new entries directly below this line.
 
 ---
 
+## #7 — Content negotiation and CSV output
+
+`feat/keyset-pagination` · 2026-09-05 · 65 tests passing · 3 files, +364 −25
+
+### Done
+
+- Accept selects JSON or CSV, with a `format` parameter overriding it for callers who
+  cannot set a header.
+- CSV columns are `PositionReportResource.model_fields`, and every row is that
+  resource's own JSON form, so the two formats cannot drift in fields or rendering.
+- Streamed from a psycopg named cursor through `StreamingResponse`; nothing buffers.
+- Absent values are empty fields; Speed is knots; timestamps are ISO-8601 UTC in both.
+- The status is chosen before the first byte: the first report is pulled while a problem
+  document is still possible, which is the #8 carry-forward decided here.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `tests/test_http_seam.py` | +171 −1 | Negotiation, CSV shape, streaming, UTC rendering |
+| `src/vessel_tracking/api.py` | +155 −20 | Negotiation, CSV rendering, streaming response, UTC normalisation |
+| `src/vessel_tracking/store.py` | +38 −4 | `stream_reports` on a server-side cursor; the shared `_select` |
+
+### Verified
+
+- Full suite 65 passed, mypy strict clean, `git diff --check` clean.
+- Streaming confirmed as observable at the seam: a `limit=1000` CSV response carries no
+  `content-length`, which a buffered body would have to.
+
+### Review caught
+
+- **Accept was a substring search, not negotiation.** `text/csv;q=0` — an explicit
+  refusal — was served CSV, and `application/json, text/csv;q=0.1` preferred CSV over
+  the caller's stated preference. Now reads q-values: CSV has to be both wanted and
+  preferred, and a tie goes to JSON.
+- **The export could hold a pooled connection until the collector noticed.** The rows
+  were handed to `itertools.chain`, which has no `close()`, so closing the response's
+  generator could not reach the store's. The remaining reports are now passed as the
+  generator itself and closed in a `finally`, and a failure during priming closes it
+  before raising.
+- `content-disposition: attachment` was not asked for by the ticket and forces a
+  download on the very address-bar caller the override parameter exists for. Removed.
+- `stream_reports` had duplicated `list_reports`' whole statement; both now build it
+  from one `_select`.
+- The streaming property itself was untested, though issue #1 puts "CSV shape and
+  streaming" on the HTTP seam.
+
+### Take note
+
+- **One review claim was wrong and worth recording as wrong**: that an abandoned export
+  could stall ingest into backoff via pool exhaustion. The API and the consumer are
+  separate processes with separate pools, so an export cannot reach ingest. It can still
+  exhaust the API's own five connections, which is the real and narrower risk.
+- **CSV has no exhaustion signal.** JSON's `next_cursor` is null exactly when done; a
+  CSV caller gets a full page and cannot tell whether more exists without asking again.
+  A `Link: rel="next"` header would need the extra row known before the body starts, and
+  it is not. The AC asks that CSV honour the same ordering and paging, which it does -
+  but the two formats are not equally self-describing, and that is a real asymmetry.
+- **A mid-export failure still truncates a 200.** Decided rather than left open: the
+  status is chosen after the datastore has been reached and the first report pulled, so
+  everything except a failure part way through an export gets a problem document. There
+  is no way to retract a status already sent.
+- `STREAM_CHUNK` is 100 against a page cap of 1,000, so an export is a handful of
+  fetches. The cursor is there for the shape of the design, not for this volume.
+
+---
+
 ## #8 — RFC 9457 error contract and UTC input handling
 
 `feat/keyset-pagination` · 2026-09-05 · 54 tests passing · 2 files, +293 −8

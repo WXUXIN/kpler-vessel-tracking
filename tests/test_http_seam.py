@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import csv
+import io
 from collections.abc import Iterator
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any
 
 from fastapi.testclient import TestClient
 
 from vessel_tracking.api import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, create_app
+from vessel_tracking.domain import PositionReport
 
 FEED_SIZE = 2696
 
@@ -420,3 +425,175 @@ def test_the_published_schema_offers_only_the_problem_media_type(
         content = responses[status]["content"]
         assert list(content) == ["application/problem+json"]
         assert content["application/problem+json"]["schema"]["$ref"].endswith("/Problem")
+
+
+def csv_rows(response: Any) -> list[list[str]]:
+    """The CSV body as rows, header included."""
+    return list(csv.reader(io.StringIO(response.text)))
+
+
+def test_an_accept_header_selects_csv(ingested_client: TestClient) -> None:
+    response = ingested_client.get(
+        "/v1/position-reports", headers={"accept": "text/csv"}, params={"limit": 3}
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert len(csv_rows(response)) == 4  # a header row and three reports
+
+
+def test_a_query_parameter_overrides_the_header(ingested_client: TestClient) -> None:
+    """So that a browser address bar, which cannot set Accept, can still ask for CSV."""
+    response = ingested_client.get(
+        "/v1/position-reports",
+        headers={"accept": "application/json"},
+        params={"format": "csv", "limit": 3},
+    )
+
+    assert response.headers["content-type"].startswith("text/csv")
+
+
+def test_csv_and_json_carry_the_same_fields_and_values(
+    ingested_client: TestClient,
+) -> None:
+    """Switching format must not change the data or how it is rendered."""
+    window = {"mmsi": NORTHERN_VESSEL, "reported_from": BOUNDARY, "limit": 20}
+    items = ingested_client.get("/v1/position-reports", params=window).json()["items"]
+    rows = csv_rows(
+        ingested_client.get("/v1/position-reports", params={**window, "format": "csv"})
+    )
+
+    header, records = rows[0], rows[1:]
+    assert header == list(items[0])
+    assert len(records) == len(items)
+    for record, item in zip(records, items):
+        assert record == ["" if item[field] is None else str(item[field]) for field in header]
+
+
+def test_csv_renders_absent_values_as_empty_fields(
+    ingested_client: TestClient,
+) -> None:
+    """Rate of Turn is empty in every supplied record and must not become "None"."""
+    rows = csv_rows(
+        ingested_client.get(
+            "/v1/position-reports", params={"format": "csv", "limit": 5}
+        )
+    )
+
+    rate_of_turn = rows[0].index("rate_of_turn")
+    assert {row[rate_of_turn] for row in rows[1:]} == {""}
+
+
+def test_csv_honours_the_same_ordering_and_paging(
+    ingested_client: TestClient,
+) -> None:
+    rows = csv_rows(
+        ingested_client.get(
+            "/v1/position-reports",
+            params={"format": "csv", "mmsi": NORTHERN_VESSEL, "limit": 10, "after": 81},
+        )
+    )
+
+    report_id = rows[0].index("report_id")
+    ids = [int(row[report_id]) for row in rows[1:]]
+    assert len(ids) == 10
+    assert ids == sorted(ids)
+    assert min(ids) > 81
+
+
+def test_a_failure_before_the_first_row_still_gets_a_problem_document() -> None:
+    """The status is already sent once streaming starts, so it is chosen before that.
+
+    The datastore is touched, and the first report pulled, while a proper error is still
+    possible. Only a failure part way through an export can truncate a 200.
+    """
+
+    class BrokenStore:
+        def stream_reports(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("the datastore fell over")
+
+    with TestClient(create_app(BrokenStore()), raise_server_exceptions=False) as broken:
+        response = broken.get("/v1/position-reports", params={"format": "csv"})
+
+    problem(response, 500)
+
+
+def test_both_formats_render_time_as_utc_whatever_the_session_says() -> None:
+    """A timestamptz arrives in the session's timezone, and must not leave in it.
+
+    Constructed directly because a database session's timezone cannot be varied through
+    the seam, and the seam's own container happens to run in UTC - which is exactly what
+    would hide this.
+    """
+    from vessel_tracking.api import PositionReportResource
+
+    eastern = timezone(timedelta(hours=2))
+    report = PositionReport(
+        report_id=81,
+        mmsi=NORTHERN_VESSEL,
+        reported_at=datetime(2013, 7, 1, 15, 6, tzinfo=eastern),
+        nav_status=0,
+        speed_knots=Decimal("18.0"),
+        course_degrees=144,
+        heading_degrees=144,
+        rate_of_turn=None,
+        latitude=42.75,
+        longitude=15.44,
+    )
+
+    rendered = PositionReportResource.of(report).model_dump(mode="json")
+
+    assert rendered["reported_at"] == "2013-07-01T13:06:00Z"
+
+
+def test_the_schema_offers_both_formats(client: TestClient) -> None:
+    served = client.get("/openapi.json").json()["paths"]["/v1/position-reports"]["get"][
+        "responses"
+    ]["200"]["content"]
+
+    assert set(served) == {"application/json", "text/csv"}
+
+
+def test_a_refused_format_is_not_served(ingested_client: TestClient) -> None:
+    """`text/csv;q=0` says do not send CSV, which is the opposite of asking for it."""
+    response = ingested_client.get(
+        "/v1/position-reports", headers={"accept": "text/csv;q=0"}, params={"limit": 1}
+    )
+
+    assert response.headers["content-type"].startswith("application/json")
+
+
+def test_the_format_the_caller_prefers_wins(ingested_client: TestClient) -> None:
+    """Tolerating CSV is not preferring it, and a tie goes to the documented default."""
+    grudging = ingested_client.get(
+        "/v1/position-reports",
+        headers={"accept": "application/json, text/csv;q=0.1"},
+        params={"limit": 1},
+    )
+    keen = ingested_client.get(
+        "/v1/position-reports",
+        headers={"accept": "text/csv;q=0.9, application/json;q=0.1"},
+        params={"limit": 1},
+    )
+    indifferent = ingested_client.get(
+        "/v1/position-reports", headers={"accept": "*/*"}, params={"limit": 1}
+    )
+
+    assert grudging.headers["content-type"].startswith("application/json")
+    assert keen.headers["content-type"].startswith("text/csv")
+    assert indifferent.headers["content-type"].startswith("application/json")
+
+
+def test_csv_is_streamed_rather_than_buffered(ingested_client: TestClient) -> None:
+    """A buffered body has to be measured first, so its absence is the observable sign.
+
+    The rows themselves come from a server-side cursor, which the seam cannot see; what
+    it can see is that the API never held the whole export to count it.
+    """
+    response = ingested_client.get(
+        "/v1/position-reports", params={"format": "csv", "limit": MAX_PAGE_SIZE}
+    )
+
+    assert response.status_code == 200
+    assert "content-length" not in response.headers
+    assert len(csv_rows(response)) == MAX_PAGE_SIZE + 1

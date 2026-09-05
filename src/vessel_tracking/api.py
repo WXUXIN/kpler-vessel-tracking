@@ -4,16 +4,26 @@ from __future__ import annotations
 
 import logging
 
-from collections.abc import AsyncIterator, Mapping, Sequence
+import csv
+import io
+from itertools import chain, islice
+from collections.abc import (
+    AsyncIterator,
+    Generator,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from http import HTTPStatus
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -143,7 +153,10 @@ class PositionReportResource(BaseModel):
         return cls(
             report_id=report.report_id,
             mmsi=report.mmsi,
-            reported_at=report.reported_at,
+            # Normalised here rather than trusted from the connection: a timestamptz
+            # comes back in the session's timezone, so a server configured otherwise
+            # would render every report at an offset. Both formats read this field.
+            reported_at=report.reported_at.astimezone(UTC),
             nav_status=report.nav_status,
             speed_knots=(
                 None if report.speed_knots is None else float(report.speed_knots)
@@ -154,6 +167,12 @@ class PositionReportResource(BaseModel):
             latitude=report.latitude,
             longitude=report.longitude,
         )
+
+
+CSV_MEDIA_TYPE = "text/csv"
+JSON_MEDIA_TYPE = "application/json"
+Format = Literal["json", "csv"]
+CSV_FIELDS = tuple(PositionReportResource.model_fields)
 
 
 class PositionReportPage(BaseModel):
@@ -216,6 +235,13 @@ class ReportQuery(BaseModel):
         None,
         description="Resume after this Report ID, taken from the previous page's next_cursor.",
     )
+    format: Format | None = Field(
+        None,
+        description=(
+            "Overrides the Accept header, for callers who cannot set one. "
+            "Defaults to JSON unless Accept asks for text/csv."
+        ),
+    )
     limit: int = Field(
         DEFAULT_PAGE_SIZE,
         ge=1,
@@ -235,6 +261,97 @@ class ReportQuery(BaseModel):
             min_longitude=self.min_longitude,
             max_longitude=self.max_longitude,
         )
+
+
+def _quality(accept: str, media_type: str) -> float:
+    """How much the caller wants a media type: its q-value, or zero if unmentioned.
+
+    Matches the type exactly, by its wildcard, or by */*. Not a general negotiation -
+    this endpoint offers two representations, so all that matters is which of the two
+    was preferred and whether either was refused outright.
+    """
+    kind, _, _ = media_type.partition("/")
+    best = 0.0
+    for offer in accept.split(","):
+        name, *parameters = (token.strip() for token in offer.split(";"))
+        if name.lower() not in (media_type, f"{kind}/*", "*/*"):
+            continue
+        weight = 1.0
+        for parameter in parameters:
+            if parameter.startswith("q="):
+                try:
+                    weight = float(parameter[2:])
+                except ValueError:
+                    weight = 0.0
+        best = max(best, weight)
+    return best
+
+
+def _wants_csv(accept: str, override: Format | None) -> bool:
+    """The query parameter wins: it exists for callers who cannot set a header.
+
+    Otherwise CSV has to be both wanted and preferred. A tie goes to JSON, which is the
+    documented default, and `text/csv;q=0` is a refusal rather than a request.
+    """
+    if override is not None:
+        return override == "csv"
+    wanted = _quality(accept, CSV_MEDIA_TYPE)
+    return wanted > 0 and wanted > _quality(accept, JSON_MEDIA_TYPE)
+
+
+def _csv_response(
+    store: PositionReportStore, query: ReportQuery
+) -> StreamingResponse:
+    """Stream the export, but choose the status before the first byte goes out.
+
+    Once a 200 is on the wire the error contract can no longer apply, so the datastore
+    is reached and the first report pulled here, while a problem document is still
+    possible. Only a failure part way through an export can truncate a response, which
+    is a property of streaming rather than something left unhandled.
+    """
+    reports = store.stream_reports(query.limit, query.filters())
+    try:
+        first = list(islice(reports, 1))
+    except BaseException:
+        reports.close()
+        raise
+    return StreamingResponse(
+        _csv_lines(first, reports),
+        media_type=CSV_MEDIA_TYPE,
+    )
+
+
+def _csv_lines(
+    first: Iterable[PositionReport], rest: Generator[PositionReport, None, None]
+) -> Iterator[str]:
+    """The same fields JSON serves, rendered once per report as they are pulled.
+
+    Each row goes through PositionReportResource, so CSV cannot drift from JSON in
+    either its columns or how it renders a value: both are the resource's own JSON
+    form, and an absent value is an empty field rather than the word None.
+
+    The remaining reports are taken as the generator itself rather than chained, so
+    that closing this one closes that one: a chain cannot pass on a close, and the
+    datastore connection would then be held until the collector happened to notice.
+    """
+    line = io.StringIO()
+    writer = csv.writer(line)
+
+    def emit() -> str:
+        rendered = line.getvalue()
+        line.seek(0)
+        line.truncate()
+        return rendered
+
+    try:
+        writer.writerow(CSV_FIELDS)
+        yield emit()
+        for report in chain(first, rest):
+            row = PositionReportResource.of(report).model_dump(mode="json")
+            writer.writerow([row[field] for field in CSV_FIELDS])
+            yield emit()
+    finally:
+        rest.close()
 
 
 def _as_utc(moment: datetime | None) -> datetime | None:
@@ -337,16 +454,28 @@ def create_app(store: PositionReportStore | None = None) -> FastAPI:
         summary="List Position Reports",
         description=ORDERING,
         responses={
+            200: {
+                "description": "A page of Position Reports.",
+                "content": {
+                    "application/json": {
+                        "schema": {"$ref": "#/components/schemas/PositionReportPage"}
+                    },
+                    CSV_MEDIA_TYPE: {"schema": {"type": "string"}},
+                },
+            },
             422: PROBLEM_RESPONSE,
             500: PROBLEM_RESPONSE,
         },
     )
     def list_position_reports(
         request: Request, query: Annotated[ReportQuery, Query()]
-    ) -> PositionReportPage:
+    ) -> PositionReportPage | StreamingResponse:
+        store = request.app.state.store
+        if _wants_csv(request.headers.get("accept", ""), query.format):
+            return _csv_response(store, query)
         # One report more than the page, so that "is there another page" is answered by
         # the datastore rather than guessed from a page that happens to look full.
-        reports = request.app.state.store.list_reports(query.limit + 1, query.filters())
+        reports = store.list_reports(query.limit + 1, query.filters())
         return PositionReportPage.of(reports, query.limit)
 
     def problem_only_openapi() -> dict[str, Any]:
