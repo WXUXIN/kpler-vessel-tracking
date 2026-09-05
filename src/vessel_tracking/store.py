@@ -7,6 +7,8 @@ parameters and are never interpolated into query text.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import psycopg
@@ -34,6 +36,58 @@ class UnstorableReport(Exception):
     Validation cannot anticipate every such case, so this lands on the dead-letter side
     of ADR-0004's taxonomy rather than the retry side.
     """
+
+
+@dataclass(frozen=True, slots=True)
+class ReportFilter:
+    """What a caller asked the collection to be narrowed to.
+
+    Every field is optional and they combine with AND, so an unset field constrains
+    nothing and the empty filter is the whole collection.
+    """
+
+    mmsis: Sequence[int] = ()
+    reported_from: datetime | None = None
+    reported_to: datetime | None = None
+    min_latitude: float | None = None
+    max_latitude: float | None = None
+    min_longitude: float | None = None
+    max_longitude: float | None = None
+
+    def conditions(self) -> tuple[list[str], list[Any]]:
+        """SQL fragments and the parameters that fill them, in step.
+
+        Values never reach the statement text: each fragment carries a placeholder and
+        its value travels beside it in the parameter list, so a filter value cannot
+        become SQL however strange it is (ADR-0005).
+        """
+        fragments: list[str] = []
+        params: list[Any] = []
+        if self.mmsis:
+            fragments.append("mmsi = ANY(%s)")
+            params.append(list(self.mmsis))
+        # Half-open, so adjacent windows neither overlap nor double-count: a report
+        # standing exactly on a bound belongs to the window that starts there.
+        if self.reported_from is not None:
+            fragments.append("reported_at >= %s")
+            params.append(self.reported_from)
+        if self.reported_to is not None:
+            fragments.append("reported_at < %s")
+            params.append(self.reported_to)
+        # Four bounds rather than one packed value, so a rejected one can be named.
+        # Inclusive on all four: a box is an area a caller drew, not a pair of windows
+        # to tile, so there is no double-counting to avoid.
+        for column, bound, comparison in (
+            ("latitude", self.min_latitude, ">="),
+            ("latitude", self.max_latitude, "<="),
+            ("longitude", self.min_longitude, ">="),
+            ("longitude", self.max_longitude, "<="),
+        ):
+            if bound is not None:
+                fragments.append(f"{column} {comparison} %s")
+                params.append(bound)
+        return fragments, params
+
 
 _COLUMNS = """
     report_id, mmsi, reported_at, nav_status, speed_knots,
@@ -106,13 +160,19 @@ class PositionReportStore:
                 )
                 return cur.fetchone()
 
-    def list_reports(self, limit: int) -> list[PositionReport]:
+    def list_reports(
+        self, limit: int, filters: ReportFilter = ReportFilter()
+    ) -> list[PositionReport]:
         """Position Reports in Report ID order - the trustworthy sequence (ADR-0006)."""
+        fragments, params = filters.conditions()
+        # Only the fragments reach the statement text, and they are fixed strings from
+        # ReportFilter itself. Everything a caller supplied travels as a parameter.
+        where = f" WHERE {' AND '.join(fragments)}" if fragments else ""
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=class_row(PositionReport)) as cur:
                 cur.execute(
-                    f"SELECT {_COLUMNS} FROM position_report"
+                    f"SELECT {_COLUMNS} FROM position_report{where}"
                     " ORDER BY report_id LIMIT %s",
-                    (limit,),
+                    (*params, limit),
                 )
                 return cur.fetchall()

@@ -23,3 +23,8 @@ Take note is the point of the file - deliberate deviations, gaps left open, anyt
 review raised that you pushed back on, and anything a later ticket inherits. Write the
 entry during the run rather than reconstructing it afterwards, and never leave a section
 empty without saying there is nothing in it.
+
+### Before committing
+
+Run `git diff --check`. Editors here add trailing whitespace on save and `git add -A`
+has twice swept a stray one-character change into an unrelated commit.

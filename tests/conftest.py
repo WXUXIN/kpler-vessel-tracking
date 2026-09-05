@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from testcontainers.postgres import PostgresContainer
 
 from vessel_tracking.domain import RejectedReport
+from vessel_tracking.ingest import ingest_messages
 from vessel_tracking.producer import encode, messages_to_publish
 from vessel_tracking.store import PositionReportStore
 
@@ -96,3 +97,19 @@ def client(store: PositionReportStore) -> Iterator[TestClient]:
 
     with TestClient(create_app(store)) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def ingested_client(
+    client: TestClient,
+    store: PositionReportStore,
+    dead_letters: RecordingDeadLetters,
+    published_stream: Callable[..., Iterator[Mapping[str, Any]]],
+) -> TestClient:
+    """The API with the whole feed behind it.
+
+    Most HTTP seam tests want the same 2,696 Position Reports in place and differ only
+    in the request they make.
+    """
+    ingest_messages(published_stream(), store, dead_letters)
+    return client
