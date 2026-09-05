@@ -68,6 +68,8 @@ Append new entries directly below this line.
   default branch" needs this merged: `origin/main` contains no `.github/` at all, and
   nothing has ever run. Everything else is done and verified locally; that line needs a
   push, a pull request and a merge.
+  **Since closed**: merged as pull request #16, and the workflow's first run on `main`
+  passed - service containers initialised, typecheck and suite both green.
 - **A same-repo pull request runs the suite twice**, once for `push` and once for
   `pull_request`. Honouring both triggers is what the ticket asks for, so the duplicate
   is accepted rather than removed; a `concurrency` group at least cancels superseded
