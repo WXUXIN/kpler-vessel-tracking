@@ -33,19 +33,21 @@ project relying on the native install keeps working untouched.
 
 ### Done
 
-- `docker-compose.yml` and `.github/workflows/tests.yml`: Postgres published on
-  `5433:5432`. The internal Docker-network address (`postgres:5432`, used by every
-  container-to-container connection) is unchanged — only the host-side publish moved.
+- `docker-compose.yml`: Postgres published on `5433:5432`. The internal Docker-network
+  address (`postgres:5432`, used by every container-to-container connection) is
+  unchanged — only the host-side publish moved.
 - `settings.py`'s `database_url` default (used only when `VT_DATABASE_URL` is unset,
   i.e. running a component directly on the host rather than via Compose) updated to
   `localhost:5433` to match, so it can't silently resolve to the native Postgres instead.
+- `.github/workflows/tests.yml` deliberately **not** changed: CI runs on an isolated
+  GitHub-hosted runner with no native Postgres to conflict with, so it has no reason to
+  move off 5432.
 
 ### Files changed
 
 | File | Lines | What changed and why |
 | --- | --- | --- |
 | `docker-compose.yml` | 1 line | Publish Postgres on host port 5433 instead of 5432 |
-| `.github/workflows/tests.yml` | 1 line | Same, so the CI service container matches |
 | `src/vessel_tracking/settings.py` | 1 line | Host-side fallback DSN updated to match |
 
 ### Verified
@@ -53,14 +55,24 @@ project relying on the native install keeps working untouched.
 - `psql "postgresql://vessel:vessel@localhost:5433/vessel_tracking"` reaches the
   container (confirmed against the `vessel` role and schema); `localhost:5432` still
   reaches the native install, as expected, and is no longer this project's concern.
+- Full `pytest` suite (76 tests) passes locally against the moved port.
 
 ### Take note
 
 - **This is a per-machine port conflict, not a project decision.** On a machine without
   a native Postgres already on 5432, the compose file would work unmodified at 5432. If
-  that ever changes here (the native install is stopped or moved), the values in the two
-  files above are the only things to revert.
+  that ever changes here (the native install is stopped or moved), the value in
+  `docker-compose.yml` is the only thing to revert.
+- **First attempt at this also changed `.github/workflows/tests.yml`'s service-container
+  port to 5433, but left its `VT_TEST_DATABASE_URL` env var pointing at 5432** — CI failed
+  with `connection refused` on every seam test as a result (61 errors). The local suite
+  didn't catch this because it uses Testcontainers, which starts its own ephemeral
+  container on a random port regardless of anything in this repo's compose file — a
+  different code path from what CI actually exercises. Reverted the CI file to its
+  original, untouched state rather than fixing the mismatched env var, since CI never
+  needed the change in the first place.
 
+## Demo front-end at `/ui`
 
 `feat/demo-frontend` · 2026-09-05 · not a ticket, asked for directly
 
