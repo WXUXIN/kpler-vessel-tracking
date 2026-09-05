@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import csv
 import io
+import time
+import uuid
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -12,7 +14,13 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from vessel_tracking.api import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, create_app
+import psycopg
+from psycopg.rows import namedtuple_row
+
 from vessel_tracking.domain import PositionReport
+from vessel_tracking.limits import Limits
+from vessel_tracking.settings import Settings
+from vessel_tracking.store import PositionReportStore, RequestRecord
 
 FEED_SIZE = 2696
 
@@ -675,3 +683,140 @@ def test_the_radius_combines_with_the_other_filters(
     assert len(with_box) == 58
     assert 0 < len(with_interval) < len(circle_only)
     assert with_another_vessel == []  # the circle holds no report of that Vessel
+
+
+RATE_LIMIT = 10
+
+
+def read_request_log(dsn: str, count: int) -> list[Any]:
+    """The request log as an operator would read it: straight from the table.
+
+    Read with SQL rather than through a method on the store, because nothing in the
+    system reads this table back - adding a way to would be production code that exists
+    only for this test.
+    """
+    with psycopg.connect(dsn) as conn:
+        with conn.cursor(row_factory=namedtuple_row) as cur:
+            cur.execute(
+                "SELECT method, path, query, client_ip, status, duration_ms,"
+                " response_bytes FROM request_log ORDER BY id DESC LIMIT %s",
+                (count,),
+            )
+            return cur.fetchall()
+
+
+def recorded(dsn: str, count: int) -> list[Any]:
+    """The request log once it has caught up.
+
+    Records are written off the response path, so a test that read the table the instant
+    a response arrived would be racing the write it is asserting on. Waiting for the
+    count is the honest way to observe something deliberately asynchronous.
+    """
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        records = read_request_log(dsn, count)
+        if len(records) >= count:
+            return records
+        time.sleep(0.02)
+    raise AssertionError(f"only {len(read_request_log(dsn, count))} of {count} recorded")
+
+
+def test_the_eleventh_request_in_a_minute_is_turned_away(
+    limited_client: TestClient,
+) -> None:
+    """One caller must not be able to exhaust capacity for everyone.
+
+    Ten is the allowance the system ships with, not a number chosen for the test.
+    """
+    assert Settings().rate_limit_allowance == RATE_LIMIT
+
+    served = "/v1/position-reports?limit=1"
+    allowed = [limited_client.get(served).status_code for _ in range(RATE_LIMIT)]
+    refused = limited_client.get(served)
+
+    assert allowed == [200] * RATE_LIMIT
+    document = problem(refused, 429)
+    assert document["title"]
+    assert int(refused.headers["retry-after"]) > 0
+    assert refused.headers["ratelimit-limit"] == str(RATE_LIMIT)
+    assert refused.headers["ratelimit-remaining"] == "0"
+
+
+def test_every_request_is_recorded(client: TestClient, dsn: str) -> None:
+    """Method, path, query, who asked, what they got, how long, and how much."""
+    client.get("/v1/position-reports", params={"limit": 1})
+
+    (record,) = recorded(dsn, 1)
+    assert record.method == "GET"
+    assert record.path == "/v1/position-reports"
+    assert record.query == "limit=1"
+    assert record.status == 200
+    assert record.client_ip
+    assert record.duration_ms > 0
+    assert record.response_bytes > 0
+
+
+def test_turned_away_requests_are_recorded_too(
+    limited_client: TestClient, dsn: str
+) -> None:
+    """A log that omits what was refused cannot show abuse, which is the point of one."""
+    for _ in range(RATE_LIMIT + 1):
+        limited_client.get("/v1/position-reports?limit=1")
+
+    statuses = [record.status for record in recorded(dsn, RATE_LIMIT + 1)]
+    assert statuses.count(429) == 1
+    assert statuses.count(200) == RATE_LIMIT
+
+
+def test_a_logging_failure_never_fails_a_request(dsn: str, redis_url: str) -> None:
+    """The log is written off the response path, so it cannot take a request with it."""
+
+    class UnwritableLog(PositionReportStore):
+        def record_request(self, record: RequestRecord) -> None:
+            raise RuntimeError("the request log is unavailable")
+
+    unwritable = UnwritableLog(dsn)
+    limits = Limits(url=redis_url, namespace=f"test-{uuid.uuid4()}")
+    try:
+        with TestClient(create_app(unwritable, limits=limits)) as client:
+            response = client.get("/healthz")
+    finally:
+        unwritable.close()
+
+    assert response.status_code == 200
+
+
+def test_the_health_probe_is_not_held_to_the_allowance(
+    limited_client: TestClient, dsn: str
+) -> None:
+    """A liveness probe is not a caller, and outpaces the allowance by design.
+
+    Compose checks every five seconds - twelve a minute against an allowance of ten - so
+    counting it would have the API declare itself unhealthy for enforcing its own limit.
+    It is still recorded, because the log is a record of traffic and this is traffic.
+    """
+    probes = [
+        limited_client.get("/healthz").status_code for _ in range(RATE_LIMIT + 5)
+    ]
+
+    assert probes == [200] * (RATE_LIMIT + 5)
+    assert [r.path for r in recorded(dsn, RATE_LIMIT + 5)] == ["/healthz"] * (
+        RATE_LIMIT + 5
+    )
+
+
+def test_a_limiter_outage_does_not_become_an_api_outage(
+    store: PositionReportStore, dsn: str
+) -> None:
+    """The limiter failing open is a decision, not an accident.
+
+    Failing closed would turn an outage of the thing that protects capacity into an
+    outage of the capacity itself. The request is still served and still recorded, so
+    the log does not go blind at the moment it is most wanted.
+    """
+    unreachable = Limits(url="redis://127.0.0.1:1/0", namespace="nowhere")
+    with TestClient(create_app(store, limits=unreachable)) as client:
+        response = client.get("/v1/position-reports", params={"limit": 1})
+
+    assert response.status_code == 200
+    assert recorded(dsn, 1)[0].status == 200

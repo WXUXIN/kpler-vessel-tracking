@@ -14,6 +14,9 @@ x-app-env: &app-env
   VT_INGEST_BATCH_SIZE: ${VT_INGEST_BATCH_SIZE:-500}
   VT_INGEST_BATCH_SECONDS: ${VT_INGEST_BATCH_SECONDS:-1.0}
   VT_IDLE_TIMEOUT_SECONDS: ${VT_IDLE_TIMEOUT_SECONDS:-0}
+  VT_REDIS_URL: ${VT_REDIS_URL:-redis://redis:6379/0}
+  VT_RATE_LIMIT_ALLOWANCE: ${VT_RATE_LIMIT_ALLOWANCE:-10}
+  VT_RATE_LIMIT_WINDOW_SECONDS: ${VT_RATE_LIMIT_WINDOW_SECONDS:-60}
 
 services:
   postgres:
@@ -56,6 +59,15 @@ services:
       retries: 20
       start_period: 20s
 
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   consumer:
     build: .
     command: vt-consumer
@@ -72,6 +84,7 @@ services:
     ports: ["8000:8000"]
     depends_on:
       postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')\""]
       interval: 5s

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
+import json
 import logging
 
 import csv
 import io
+import time
 from itertools import chain, islice
 from collections.abc import (
     AsyncIterator,
@@ -25,11 +29,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
+import anyio
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from vessel_tracking.domain import PositionReport
+from vessel_tracking.limits import Decision, Limits
 from vessel_tracking.settings import Settings
-from vessel_tracking.store import PositionReportStore, ReportFilter
+from vessel_tracking.store import PositionReportStore, ReportFilter, RequestRecord
 
 log = logging.getLogger("vessel_tracking.api")
 
@@ -93,6 +100,160 @@ PROBLEM_RESPONSE: dict[str, Any] = {
 }
 
 
+# How many request records may be in flight at once. See RequestLog.record.
+MAX_PENDING_RECORDS = 32
+
+
+class RequestLog:
+    """Writes request records without a request waiting for them.
+
+    Each write is its own task, started once the response is on its way out. The tasks
+    are held so that a shutdown can wait for them rather than cancelling records that
+    have already been counted as kept.
+    """
+
+    def __init__(self, concurrency: int = MAX_PENDING_RECORDS) -> None:
+        self._writing: set[asyncio.Task[None]] = set()
+        self._concurrency = concurrency
+
+    def record(self, store: PositionReportStore, record: RequestRecord) -> None:
+        log.info(json.dumps({"event": "request", **dataclasses.asdict(record)}))
+        if len(self._writing) >= self._concurrency:
+            # An unreachable datastore parks each write in a worker thread until the
+            # pool gives up. Left unbounded, enough of them exhaust the thread limiter
+            # that ordinary requests - and the health probe - stop being served, so a
+            # datastore outage would take the API with it. Records are dropped instead,
+            # loudly, because losing a log line beats losing the service it describes.
+            log.error(
+                json.dumps(
+                    {"event": "request_log_saturated", "pending": len(self._writing)}
+                )
+            )
+            return
+        task = asyncio.create_task(self._write(store, record))
+        self._writing.add(task)
+        task.add_done_callback(self._writing.discard)
+
+    @staticmethod
+    async def _write(store: PositionReportStore, record: RequestRecord) -> None:
+        """A log that cannot be written is the operator's problem, not the caller's.
+
+        The request has already been answered by the time this runs, so the only honest
+        thing a failure here can do is say so.
+        """
+        try:
+            await anyio.to_thread.run_sync(store.record_request, record)
+        except Exception:
+            log.exception("could not record a request")
+
+    async def drain(self) -> None:
+        """Wait for the writes, including any started while waiting for the others."""
+        while self._writing:
+            await asyncio.gather(*tuple(self._writing), return_exceptions=True)
+
+
+# A container's liveness probe is not a caller. At one check every five seconds it
+# spends twelve of a ten-request allowance per minute, and the API would then report
+# itself unhealthy for correctly enforcing its own limit. Still recorded, just not
+# counted: the log is a record of traffic, and this is traffic.
+UNLIMITED_PATHS = frozenset({"/healthz"})
+
+
+class Traffic:
+    """Rate limits, times and records every request.
+
+    Raw ASGI rather than BaseHTTPMiddleware, which collects a response into memory
+    before passing it on. That would quietly undo the CSV streaming in the one place it
+    matters, so this watches the messages go past instead of holding them.
+    """
+
+    def __init__(self, app: ASGIApp, limits: Limits, requests: RequestLog) -> None:
+        self._app = app
+        self._limits = limits
+        self._requests = requests
+
+    async def _allowance(self, scope: Scope, client: str) -> Decision | None:
+        """What the limiter says, or nothing at all if it cannot be asked.
+
+        A limiter that is down fails open. The alternative turns an outage of the thing
+        that protects capacity into an outage of the capacity itself, which is a worse
+        answer to every caller in order to give a better one to none. It is logged at
+        error, because for as long as it lasts the limit is not being applied.
+        """
+        if scope["path"] in UNLIMITED_PATHS:
+            return None
+        try:
+            return await self._limits.check(client)
+        except Exception as unreachable:
+            log.error(
+                json.dumps(
+                    {"event": "rate_limiter_unavailable", "detail": str(unreachable)}
+                )
+            )
+            return None
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        client = scope["client"][0] if scope.get("client") else "unknown"
+        started = time.perf_counter()
+        status = 500
+        written = 0
+
+        async def watch(message: Message) -> None:
+            nonlocal status, written
+            if message["type"] == "http.response.start":
+                status = message["status"]
+            elif message["type"] == "http.response.body":
+                written += len(message.get("body", b""))
+            await send(message)
+
+        try:
+            decision = await self._allowance(scope, client)
+            if decision is None or decision.allowed:
+                await self._app(scope, receive, watch)
+            else:
+                await _too_many_requests(scope, decision)(scope, receive, watch)
+        finally:
+            self._requests.record(
+                scope["app"].state.store,
+                RequestRecord(
+                    method=scope["method"],
+                    path=scope["path"],
+                    query=scope["query_string"].decode() or None,
+                    client_ip=client,
+                    status=status,
+                    duration_ms=round((time.perf_counter() - started) * 1000, 3),
+                    response_bytes=written,
+                ),
+            )
+
+
+def _too_many_requests(scope: Scope, decision: Decision) -> JSONResponse:
+    """The same document as every other failure, plus what to do about this one."""
+    return _problem_response(
+        Problem(
+            title=HTTPStatus.TOO_MANY_REQUESTS.phrase,
+            status=429,
+            detail=(
+                f"At most {decision.allowance} requests are served per client "
+                f"per minute. Try again in {decision.retry_after_seconds} seconds."
+            ),
+            instance=_occurrence(
+                str(scope["path"]), scope["query_string"].decode()
+            ),
+        ),
+        headers={
+            "retry-after": str(decision.retry_after_seconds),
+            "ratelimit-limit": str(decision.allowance),
+            "ratelimit-remaining": str(decision.remaining),
+            "ratelimit-reset": str(decision.retry_after_seconds),
+        },
+    )
+
+
 def _status_phrase(status: int) -> str:
     """The IANA phrase for a status, or a plain title for a code that has none."""
     try:
@@ -101,14 +262,13 @@ def _status_phrase(status: int) -> str:
         return "Error"
 
 
-def _occurrence(request: Request) -> str:
+def _occurrence(path: str, query: str) -> str:
     """What actually failed, not merely where.
 
     RFC 9457 asks instance to identify the occurrence. The path alone is the same on
     every rejected request to a collection; the query string is the part that varied.
     """
-    query = request.url.query
-    return f"{request.url.path}?{query}" if query else request.url.path
+    return f"{path}?{query}" if query else path
 
 
 def _parameter_name(location: Sequence[Any]) -> str | None:
@@ -412,20 +572,40 @@ def _as_utc(moment: datetime | None) -> datetime | None:
     return moment.replace(tzinfo=UTC)
 
 
-def create_app(store: PositionReportStore | None = None) -> FastAPI:
-    """Build the application.
+def create_app(
+    store: PositionReportStore | None = None, limits: Limits | None = None
+) -> FastAPI:
+    """Build the application, and the entrypoint uvicorn calls with --factory.
 
-    A store may be supplied, in which case the caller owns its lifetime; otherwise one
-    is opened from settings for the lifetime of the application.
+    Being the entrypoint, it configures logging: uvicorn sets up its own loggers and
+    leaves the root logger without handlers, so without this every request record would
+    be built, formatted and then discarded. `force` is off so a host that has already
+    configured logging keeps its own arrangement.
+
+    A store and a limiter may be supplied, in which case the caller owns their
+    lifetimes; otherwise they are opened from settings for the life of the application.
     """
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    settings = Settings()
     owns_store = store is None
+    owns_limits = limits is None
+    limiter = limits or Limits(
+        settings.redis_url,
+        allowance=settings.rate_limit_allowance,
+        window_seconds=settings.rate_limit_window_seconds,
+    )
+    requests = RequestLog()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        app.state.store = store or PositionReportStore(Settings().database_url)
+        app.state.store = store or PositionReportStore(settings.database_url)
         try:
             yield
         finally:
+            # Records already counted as kept are waited for rather than cancelled.
+            await requests.drain()
+            if owns_limits:
+                await limiter.close()
             if owns_store:
                 app.state.store.close()
 
@@ -434,6 +614,8 @@ def create_app(store: PositionReportStore | None = None) -> FastAPI:
         summary="Position Reports observed from AIS.",
         lifespan=lifespan,
     )
+
+    app.add_middleware(Traffic, limits=limiter, requests=requests)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_parameters(
@@ -448,7 +630,7 @@ def create_app(store: PositionReportStore | None = None) -> FastAPI:
                 title="Invalid parameters",
                 status=422,
                 detail="The request could not be understood as it stands.",
-                instance=_occurrence(request),
+                instance=_occurrence(request.url.path, request.url.query),
                 errors=[
                     InvalidParameter(
                         parameter=_parameter_name(error["loc"]),
@@ -470,7 +652,7 @@ def create_app(store: PositionReportStore | None = None) -> FastAPI:
                 title=_status_phrase(failure.status_code),
                 status=failure.status_code,
                 detail=str(failure.detail) if failure.detail else None,
-                instance=_occurrence(request),
+                instance=_occurrence(request.url.path, request.url.query),
             ),
             headers=failure.headers,
         )
@@ -488,7 +670,7 @@ def create_app(store: PositionReportStore | None = None) -> FastAPI:
                 title=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
                 status=500,
                 detail="The request could not be served. The failure has been logged.",
-                instance=_occurrence(request),
+                instance=_occurrence(request.url.path, request.url.query),
             )
         )
 

@@ -44,3 +44,23 @@ CREATE INDEX IF NOT EXISTS position_report_mmsi_reported_at
 -- even at this volume, which is the opposite of what the row count alone would suggest.
 CREATE INDEX IF NOT EXISTS position_report_position
     ON position_report USING GIST (position);
+
+-- Every request that reached the API, including the ones it turned away: a log that
+-- omits refused traffic cannot show abuse, which is most of the reason to keep one.
+--
+-- The client is text rather than inet because it records whatever the transport
+-- reported, the same way a Position Report records what the feed said. A value that
+-- does not parse as an address is a fact about the request, not a reason to lose it.
+CREATE TABLE IF NOT EXISTS request_log (
+    id              bigserial   PRIMARY KEY,
+    received_at     timestamptz NOT NULL DEFAULT now(),
+    method          text        NOT NULL,
+    path            text        NOT NULL,
+    query           text,
+    client_ip       text        NOT NULL,
+    status          smallint    NOT NULL,
+    duration_ms     numeric(12,3) NOT NULL,
+    response_bytes  integer     NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS request_log_received_at ON request_log (received_at DESC);

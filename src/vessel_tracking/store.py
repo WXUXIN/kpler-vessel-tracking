@@ -143,6 +143,26 @@ _INSERT = f"""
 STREAM_CHUNK = 100
 
 
+@dataclass(frozen=True, slots=True)
+class RequestRecord:
+    """One request as the log keeps it: what was asked, and what came back."""
+
+    method: str
+    path: str
+    query: str | None
+    client_ip: str
+    status: int
+    duration_ms: float
+    response_bytes: int
+
+
+_RECORD_REQUEST = """
+    INSERT INTO request_log
+        (method, path, query, client_ip, status, duration_ms, response_bytes)
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
+"""
+
+
 class PositionReportStore:
     def __init__(self, dsn: str) -> None:
         self._pool = ConnectionPool(dsn, min_size=1, max_size=5, open=True)
@@ -216,6 +236,22 @@ class PositionReportStore:
                 cur.itersize = STREAM_CHUNK
                 cur.execute(statement, (*params, limit))
                 yield from cur
+
+    def record_request(self, record: RequestRecord) -> None:
+        """Write one request to the log. Called off the response path."""
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                _RECORD_REQUEST,
+                (
+                    record.method,
+                    record.path,
+                    record.query,
+                    record.client_ip,
+                    record.status,
+                    record.duration_ms,
+                    record.response_bytes,
+                ),
+            )
 
     def count(self) -> int:
         with self._pool.connection() as conn, conn.cursor() as cur:

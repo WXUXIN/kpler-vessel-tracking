@@ -14,6 +14,81 @@ Append new entries directly below this line.
 
 ---
 
+## #9 — Rate limiting and request logging
+
+`feat/keyset-pagination` · 2026-09-05 · 76 tests passing · 10 files, +484 −16
+
+### Done
+
+- Redis as a Compose service with a healthcheck; the API waits on it.
+- Ten requests per client per minute, counted in Redis so the limit holds across
+  however many API instances run.
+- The eleventh gets an RFC 9457 document with `retry-after` and the `ratelimit-*` headers.
+- Every request recorded with method, path, query, client, status, duration and size -
+  refused ones included, since a log that omits them cannot show abuse.
+- Records are written off the response path and also printed for container collection.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `src/vessel_tracking/api.py` | +194 −12 | `Traffic` middleware, `RequestLog`, the 429 document, logging configuration |
+| `tests/test_http_seam.py` | +145 | The limit, the headers, the log, the probe exemption, a limiter outage |
+| `src/vessel_tracking/store.py` | +36 | `RequestRecord` and the insert |
+| `tests/conftest.py` | +36 −3 | A real Redis container; separate clients for limited and unlimited tests |
+| `tests/test_compose_smoke.py` | +25 | Records on the container's stdout |
+| `db/001_schema.sql` | +20 | The `request_log` table |
+| `docker-compose.yml` | +13 | The Redis service and its settings |
+| `src/vessel_tracking/settings.py`, `.env.example`, `pyproject.toml` | +15 −1 | Redis URL, allowance, window; the `redis` dependency |
+
+### Verified
+
+- Full suite 76 passed, mypy strict clean, `git diff --check` clean.
+- By hand against the real stack: ten 200s then a 429 carrying `retry-after: 48`,
+  `ratelimit-limit: 10`, `ratelimit-remaining: 0`, and the problem document. The
+  `request_log` table held both the served and the refused requests.
+
+### Review caught
+
+- **Records never reached stdout, which is the whole of one acceptance criterion.**
+  Uvicorn configures its own loggers and leaves the root without handlers, so the
+  effective level for this module was WARNING and every record was built, formatted and
+  discarded. Confirmed by applying uvicorn's own logging config and asking. **The test
+  suite hid it**: pytest installs a root handler, so it worked everywhere except
+  production. Now configured in `create_app`, and asserted in the Compose seam, which is
+  the only place a real container's stdout can be read.
+- **A Redis outage took the whole API down.** The limiter call sat outside the
+  `try/finally`, so a connection error escaped as a bare 500 - not even a problem
+  document - and the request was never recorded, blinding the log exactly when it is
+  most wanted. `/healthz` is exempt from the limit, so Compose would have gone on
+  reporting the container healthy while it failed everything. It now fails open.
+- **An unreachable datastore would have taken the API down too.** Each log write parks a
+  worker thread until the pool gives up; unbounded, enough of them exhaust the thread
+  limiter that ordinary requests stop being served. Records are now dropped, loudly,
+  beyond 32 in flight.
+- `drain` awaited one snapshot of the pending writes, so a record started during the
+  drain was lost. It loops now.
+- `recent_requests` and a public `dsn` were production code existing only for tests.
+  Removed; the tests read `request_log` with SQL, as an operator would.
+
+### Take note
+
+- **Found by hand, not by any test: the health probe was rate-limiting itself.** Compose
+  checks every five seconds - twelve a minute against an allowance of ten - so the API
+  would have started refusing its own liveness probe and been marked unhealthy for
+  enforcing its own limit. `/healthz` is exempt from the allowance and still logged.
+  Nothing in the seam could have caught this; it needed the real stack.
+- **Failing open is a decision with a cost**, and it is recorded only here and in a
+  docstring. Anyone who can make Redis unreachable removes the rate limit. The
+  alternative makes a limiter outage a total outage, which is worse for everyone rather
+  than better for anyone - but it is a trade, and it may deserve an ADR before #12.
+- The window is keyed on each process's own clock, so instances with skewed clocks can
+  count into different windows. Inherent to a fixed window keyed this way.
+- `/healthz` is exempt and unauthenticated, so it can be called without limit, and each
+  call writes a log row.
+
+---
+
 ## #10 — Radius filter
 
 `feat/keyset-pagination` · 2026-09-05 · 69 tests passing · 4 files, +179 −12

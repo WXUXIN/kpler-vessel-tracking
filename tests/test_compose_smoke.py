@@ -108,3 +108,28 @@ def test_a_consumer_given_an_idle_timeout_stops_on_its_own(pipeline: None) -> No
     )
 
     assert '"stopped_by": "idle"' in run.stdout + run.stderr
+
+
+def test_request_records_reach_container_stdout(pipeline: None) -> None:
+    """Container log collection should need no configuration to see traffic.
+
+    Only a real container can show this. Uvicorn configures its own loggers and leaves
+    the root without handlers, so the records were built and discarded until the app
+    began configuring logging itself - and the test suite installs a handler of its own,
+    which is precisely what hid it from every other seam.
+    """
+    urllib.request.urlopen(f"{API}?limit=1", timeout=30).read()
+
+    logs = _compose("logs", "api", "--tail", "200")
+    records = [
+        json.loads(line[line.index("{") :])
+        for line in (logs.stdout + logs.stderr).splitlines()
+        if '"event": "request"' in line
+    ]
+
+    assert records, "no request records on the container's stdout"
+    served = [r for r in records if r["path"] == "/v1/position-reports"]
+    assert served
+    assert served[-1]["status"] == 200
+    assert served[-1]["method"] == "GET"
+    assert served[-1]["duration_ms"] > 0
