@@ -26,5 +26,7 @@ empty without saying there is nothing in it.
 
 ### Before committing
 
-Run `git diff --check`. Editors here add trailing whitespace on save and `git add -A`
-has twice swept a stray one-character change into an unrelated commit.
+Stage first, then run `git add -A && git diff --cached --check`. Editors here add
+trailing whitespace on save and `git add -A` has twice swept a stray one-character
+change into an unrelated commit. Staging first matters: `git diff --check` alone cannot
+see untracked files, so a whole new file passes the gate without being looked at.

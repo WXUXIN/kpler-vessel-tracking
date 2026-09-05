@@ -14,6 +14,76 @@ Append new entries directly below this line.
 
 ---
 
+## #11 — CI: run the test suite on every push
+
+`feat/keyset-pagination` · 2026-09-05 · 76 tests passing · 4 files, +112 −7
+
+### Done
+
+- A workflow runs mypy and the suite on every push and every pull request.
+- PostGIS and Redis run as service containers, and the fixtures use them when the
+  environment names them, falling back to testcontainers for a developer with Docker.
+- The Compose smoke test is excluded: it builds images and drives a whole stack, which
+  is a different question from whether the code is correct.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `.github/workflows/tests.yml` | +75 | The workflow, its services, and their health commands |
+| `tests/conftest.py` | +25 −4 | Use a provided database and Redis when the environment names them |
+| `docker-compose.yml` | +8 −1 | The same health command fix, found here |
+| `AGENTS.md` | +4 −2 | Stage before checking whitespace, or new files are never checked |
+
+### Verified
+
+- Full suite 76 passed, mypy strict clean.
+- **The CI path was run locally, not assumed**: with `VT_TEST_DATABASE_URL` and
+  `VT_TEST_REDIS_URL` pointed at standalone containers, 73 tests pass and no fixture
+  starts a container of its own.
+- Compose still comes up with the new health command.
+
+### Review caught
+
+- **My healthcheck fix did not fix what its comment claimed, and I had written the claim
+  without measuring it.** Both axes flagged it; reproduced directly with a slow init
+  script: `pg_isready` *and* `psql` over the unix socket both report success from about
+  four seconds, while initdb's temporary server is still running, TCP is refused, and
+  `001_schema.sql` has not been applied. Twelve seconds of false confidence, during
+  which a dependent would start against a database with no `position_report` in it. Only
+  a TCP connection waits for the real server, and it becomes available at the same
+  instant the tables do. Both copies now force TCP, and both comments say what was
+  measured.
+- **The whitespace gate never saw the workflow.** `git diff --check` cannot see
+  untracked files, so an entirely new file passes it vacuously. `AGENTS.md` now says to
+  stage first.
+- `_with_schema(url) -> str` returned its own argument and read as a pure function while
+  performing DDL. Now `apply_schema(url) -> None`.
+- The fixture docstring claimed both paths "run against the same database". They do not:
+  one is fresh per session, the other is whatever was there before.
+
+### Take note
+
+- **The last acceptance criterion cannot be met from here.** "The workflow passes on the
+  default branch" needs this merged: `origin/main` contains no `.github/` at all, and
+  nothing has ever run. Everything else is done and verified locally; that line needs a
+  push, a pull request and a merge.
+- **A same-repo pull request runs the suite twice**, once for `push` and once for
+  `pull_request`. Honouring both triggers is what the ticket asks for, so the duplicate
+  is accepted rather than removed; a `concurrency` group at least cancels superseded
+  runs on the same ref.
+- **The `mypy` step was not asked for.** The criterion says "runs the test suite". Kept,
+  because a repo configured mypy-strict whose CI does not typecheck is a gate with a
+  hole in it, but it can red the workflow for something no criterion covers.
+- **The Compose healthcheck change belongs to no ticket.** #11 excludes Compose
+  explicitly. It rode along because this is where the defect was found, and leaving a
+  healthcheck that lies once it is known to lie seemed worse than the scope.
+- Pointing `VT_TEST_DATABASE_URL` at a long-lived database is a trap: every statement in
+  the schema is IF NOT EXISTS, so an older schema is silently left alone and the tests
+  run against it. Documented in the fixture rather than guarded.
+
+---
+
 ## #9 — Rate limiting and request logging
 
 `feat/keyset-pagination` · 2026-09-05 · 76 tests passing · 10 files, +484 −16

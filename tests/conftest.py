@@ -1,4 +1,5 @@
 import json
+import os
 import pathlib
 import uuid
 from collections.abc import Iterator, Mapping
@@ -28,13 +29,28 @@ def dsn() -> Iterator[str]:
     The seam tests use a real database rather than a fake because the behaviour most
     worth testing - conflict handling on insert, and the filter predicates - is exactly
     what a fake would accept and a real database would reject.
+
+    CI supplies one as a service container and says so through the environment; a
+    developer with only Docker gets a fresh one started for them. The schema is applied
+    either way, but only the started one is guaranteed empty: every statement in
+    `db/001_schema.sql` is IF NOT EXISTS, so pointing this at a database that already
+    has an older schema will quietly leave it as it is.
     """
+    provided = os.environ.get("VT_TEST_DATABASE_URL")
+    if provided:
+        apply_schema(provided)
+        yield provided
+        return
     with PostgresContainer("postgis/postgis:16-3.4", driver=None) as postgres:
         url = postgres.get_connection_url()
-        with psycopg.connect(url) as conn:
-            conn.execute(SCHEMA.read_text())
-            conn.commit()
+        apply_schema(url)
         yield url
+
+
+def apply_schema(url: str) -> None:
+    with psycopg.connect(url) as conn:
+        conn.execute(SCHEMA.read_text())
+        conn.commit()
 
 
 @pytest.fixture(scope="session")
@@ -44,8 +60,13 @@ def redis_url() -> Iterator[str]:
     A fixed window is one INCR and one EXPIRE racing each other; a fake would accept
     any ordering of those, which is precisely the part worth testing.
     """
+    provided = os.environ.get("VT_TEST_REDIS_URL")
+    if provided:
+        yield provided
+        return
     with RedisContainer("redis:7-alpine") as container:
-        yield f"redis://{container.get_container_host_ip()}:{container.get_exposed_port(6379)}/0"
+        host = container.get_container_host_ip()
+        yield f"redis://{host}:{container.get_exposed_port(6379)}/0"
 
 
 @pytest.fixture

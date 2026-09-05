@@ -29,7 +29,14 @@ services:
     volumes:
       - ./db/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${VT_POSTGRES_USER:-vessel} -d ${VT_POSTGRES_DB:-vessel_tracking}"]
+      # Over TCP on purpose. Measured against this image with a slow init script:
+      # pg_isready, and psql over the unix socket, both report success from about four
+      # seconds - while initdb's temporary server is still running, TCP is refused, and
+      # the schema in /docker-entrypoint-initdb.d has not been applied. Only a TCP
+      # connection waits for the real server, and it becomes available at the same
+      # moment the tables do. A dependent that waits on the socket check would start
+      # against a database with no position_report in it.
+      test: ["CMD-SHELL", "PGPASSWORD=${VT_POSTGRES_PASSWORD:-vessel} psql -h 127.0.0.1 -U ${VT_POSTGRES_USER:-vessel} -d ${VT_POSTGRES_DB:-vessel_tracking} -c 'SELECT 1'"]
       interval: 5s
       timeout: 5s
       retries: 20
