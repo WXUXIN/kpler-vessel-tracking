@@ -49,9 +49,6 @@ curl 'http://localhost:8000/v1/position-reports?mmsi=311486000&limit=2'
 curl 'http://localhost:8000/v1/position-reports?format=csv&limit=2'
 ```
 
-Or open `http://localhost:8000/ui/` for the same endpoint on a map — see
-[Demo front-end](#demo-front-end).
-
 The supplied feed contains no invalid records, so the rejection path needs messages made
 for the purpose:
 
@@ -122,19 +119,6 @@ Requests are limited to ten per minute per client IP, counted in Redis so the li
 the same thing however many API instances run. The eleventh gets a problem document with
 `retry-after` and `ratelimit-*` headers. Every request is written to a `request_log`
 table — the refused ones especially, since a log that omits them cannot show abuse.
-
-### Demo front-end
-
-A static page at **`/ui/`** (`http://localhost:8000/ui/` once the stack is up) puts the
-API on a map instead of a terminal: the three vessels' full tracks on load, click-to-set
-radius search with a live circle overlay, keyset pagination via a "Load next page"
-button, a CSV download, and a telemetry strip that shows the rate limiter's own headers
-when you trip it. It's a plain HTML/JS page served same-origin by the API itself (see
-`src/vessel_tracking/api.py`'s `StaticFiles` mount) — no build step, no framework, no
-CORS needed. One panel is worth calling out specifically: **Track coherence**, which
-refetches vessel 311486000's reports and redraws its path ordered by Report ID versus by
-Reported Time, so the [finding below](#dataset-observations) about which one actually
-orders this data is something you can see rather than take on faith.
 
 ---
 
