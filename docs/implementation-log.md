@@ -14,6 +14,56 @@ Append new entries directly below this line.
 
 ---
 
+## Glossary — the six "missing" terms, and the one that was actually missing
+
+`feat/keyset-pagination` · 2026-09-05 · docs only
+
+Not an `/implement` run. This closes the Take note item that the #4, #5 and #6 entries
+each carried forward, and corrects it: the item was wrong.
+
+### Done
+
+- Added **Feed** to `CONTEXT.md`. It was used three times inside the glossary's own
+  definitions — "the source feed", "the raw feed's `stationId`", "the source feed
+  transmits it" — and defined nowhere. 39 uses across the code and ADRs.
+- Added a scope sentence to the glossary header saying what it deliberately excludes,
+  so this false gap stops being rediscovered.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `CONTEXT.md` | +11 −1 | The Feed entry, and a header sentence bounding what the glossary is for |
+| `docs/implementation-log.md` | this entry | Correcting a claim the log made three times |
+
+### What the earlier entries got wrong
+
+Three entries flagged six terms as glossary gaps: poison message, transient failure,
+bounding box, time interval, cursor, page size. Tested against the format's own rule —
+*only include terms specific to this project's context; general programming concepts do
+not belong even if the project uses them extensively* — **none of the six qualifies**.
+All six are general engineering vocabulary that this project happens to use.
+
+Two of them were already defined anyway. `poison message` and `transient failure` appear
+in bold in ADR-0004, which is where the decision that gives them meaning lives; copying
+them into the glossary would have created a second definition to keep in step with the
+first. `bounding box` and `time interval` turned out not to appear in `src/` or the ADRs
+at all — they are specification and test language, which is why they felt absent.
+
+Counting undefined terms is not the same as finding gaps. The measure that found the real
+one was different: which words do the glossary's own definitions lean on without
+defining. That test found exactly one, and it was not on the list.
+
+### Take note
+
+- **The recurring item is closed, not deferred.** If a future entry reports "glossary
+  gaps widening" over general vocabulary, this is the answer.
+- `Feed` is the only addition. `replay`, `redelivery`, `seam` and `offset` were
+  considered and left out on the same rule.
+- No ADR. Nothing here was hard to reverse or the result of a real trade-off.
+
+---
+
 ## #6 — Ordering and keyset pagination
 
 `feat/keyset-pagination` · 2026-09-05 · 46 tests passing · 4 files, +277 −95

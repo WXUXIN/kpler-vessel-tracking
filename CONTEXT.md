@@ -1,7 +1,12 @@
 # Vessel Tracking
 
 Ingests AIS vessel position broadcasts through a streaming pipeline and serves them
-over a filtered HTTP API. This glossary is the project's shared vocabulary.
+over a filtered HTTP API.
+
+This glossary holds the terms this domain gives a particular meaning to. General
+engineering vocabulary - cursors, batches, poison messages, bounding boxes - stays out
+however often the code says it; where such a term carries a decision, it is defined in
+the ADR that made it.
 
 ## Language
 
@@ -9,6 +14,12 @@ over a filtered HTTP API. This glossary is the project's shared vocabulary.
 The Automatic Identification System, a maritime VHF broadcast standard by which vessels
 transmit their identity and movement. It is a lossy, unauthenticated medium: reports are
 missed, duplicated, and occasionally wrong.
+
+**Feed**:
+The sequence of raw AIS messages this system ingests, supplied as a single file and
+replayed one message at a time rather than loaded in bulk. Its order is the order the
+messages were received, and the Report ID is what carries that order into the system.
+_Avoid_: dataset, source data, input file
 
 **Vessel**:
 A ship, identified across the system by its MMSI. The system holds no vessel attributes
