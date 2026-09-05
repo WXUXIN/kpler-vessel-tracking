@@ -14,6 +14,407 @@ Append new entries directly below this line.
 
 ---
 
+## #11 — CI: run the test suite on every push
+
+`feat/keyset-pagination` · 2026-09-05 · 76 tests passing · 4 files, +112 −7
+
+### Done
+
+- A workflow runs mypy and the suite on every push and every pull request.
+- PostGIS and Redis run as service containers, and the fixtures use them when the
+  environment names them, falling back to testcontainers for a developer with Docker.
+- The Compose smoke test is excluded: it builds images and drives a whole stack, which
+  is a different question from whether the code is correct.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `.github/workflows/tests.yml` | +75 | The workflow, its services, and their health commands |
+| `tests/conftest.py` | +25 −4 | Use a provided database and Redis when the environment names them |
+| `docker-compose.yml` | +8 −1 | The same health command fix, found here |
+| `AGENTS.md` | +4 −2 | Stage before checking whitespace, or new files are never checked |
+
+### Verified
+
+- Full suite 76 passed, mypy strict clean.
+- **The CI path was run locally, not assumed**: with `VT_TEST_DATABASE_URL` and
+  `VT_TEST_REDIS_URL` pointed at standalone containers, 73 tests pass and no fixture
+  starts a container of its own.
+- Compose still comes up with the new health command.
+
+### Review caught
+
+- **My healthcheck fix did not fix what its comment claimed, and I had written the claim
+  without measuring it.** Both axes flagged it; reproduced directly with a slow init
+  script: `pg_isready` *and* `psql` over the unix socket both report success from about
+  four seconds, while initdb's temporary server is still running, TCP is refused, and
+  `001_schema.sql` has not been applied. Twelve seconds of false confidence, during
+  which a dependent would start against a database with no `position_report` in it. Only
+  a TCP connection waits for the real server, and it becomes available at the same
+  instant the tables do. Both copies now force TCP, and both comments say what was
+  measured.
+- **The whitespace gate never saw the workflow.** `git diff --check` cannot see
+  untracked files, so an entirely new file passes it vacuously. `AGENTS.md` now says to
+  stage first.
+- `_with_schema(url) -> str` returned its own argument and read as a pure function while
+  performing DDL. Now `apply_schema(url) -> None`.
+- The fixture docstring claimed both paths "run against the same database". They do not:
+  one is fresh per session, the other is whatever was there before.
+
+### Take note
+
+- **The last acceptance criterion cannot be met from here.** "The workflow passes on the
+  default branch" needs this merged: `origin/main` contains no `.github/` at all, and
+  nothing has ever run. Everything else is done and verified locally; that line needs a
+  push, a pull request and a merge.
+- **A same-repo pull request runs the suite twice**, once for `push` and once for
+  `pull_request`. Honouring both triggers is what the ticket asks for, so the duplicate
+  is accepted rather than removed; a `concurrency` group at least cancels superseded
+  runs on the same ref.
+- **The `mypy` step was not asked for.** The criterion says "runs the test suite". Kept,
+  because a repo configured mypy-strict whose CI does not typecheck is a gate with a
+  hole in it, but it can red the workflow for something no criterion covers.
+- **The Compose healthcheck change belongs to no ticket.** #11 excludes Compose
+  explicitly. It rode along because this is where the defect was found, and leaving a
+  healthcheck that lies once it is known to lie seemed worse than the scope.
+- Pointing `VT_TEST_DATABASE_URL` at a long-lived database is a trap: every statement in
+  the schema is IF NOT EXISTS, so an older schema is silently left alone and the tests
+  run against it. Documented in the fixture rather than guarded.
+
+---
+
+## #9 — Rate limiting and request logging
+
+`feat/keyset-pagination` · 2026-09-05 · 76 tests passing · 10 files, +484 −16
+
+### Done
+
+- Redis as a Compose service with a healthcheck; the API waits on it.
+- Ten requests per client per minute, counted in Redis so the limit holds across
+  however many API instances run.
+- The eleventh gets an RFC 9457 document with `retry-after` and the `ratelimit-*` headers.
+- Every request recorded with method, path, query, client, status, duration and size -
+  refused ones included, since a log that omits them cannot show abuse.
+- Records are written off the response path and also printed for container collection.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `src/vessel_tracking/api.py` | +194 −12 | `Traffic` middleware, `RequestLog`, the 429 document, logging configuration |
+| `tests/test_http_seam.py` | +145 | The limit, the headers, the log, the probe exemption, a limiter outage |
+| `src/vessel_tracking/store.py` | +36 | `RequestRecord` and the insert |
+| `tests/conftest.py` | +36 −3 | A real Redis container; separate clients for limited and unlimited tests |
+| `tests/test_compose_smoke.py` | +25 | Records on the container's stdout |
+| `db/001_schema.sql` | +20 | The `request_log` table |
+| `docker-compose.yml` | +13 | The Redis service and its settings |
+| `src/vessel_tracking/settings.py`, `.env.example`, `pyproject.toml` | +15 −1 | Redis URL, allowance, window; the `redis` dependency |
+
+### Verified
+
+- Full suite 76 passed, mypy strict clean, `git diff --check` clean.
+- By hand against the real stack: ten 200s then a 429 carrying `retry-after: 48`,
+  `ratelimit-limit: 10`, `ratelimit-remaining: 0`, and the problem document. The
+  `request_log` table held both the served and the refused requests.
+
+### Review caught
+
+- **Records never reached stdout, which is the whole of one acceptance criterion.**
+  Uvicorn configures its own loggers and leaves the root without handlers, so the
+  effective level for this module was WARNING and every record was built, formatted and
+  discarded. Confirmed by applying uvicorn's own logging config and asking. **The test
+  suite hid it**: pytest installs a root handler, so it worked everywhere except
+  production. Now configured in `create_app`, and asserted in the Compose seam, which is
+  the only place a real container's stdout can be read.
+- **A Redis outage took the whole API down.** The limiter call sat outside the
+  `try/finally`, so a connection error escaped as a bare 500 - not even a problem
+  document - and the request was never recorded, blinding the log exactly when it is
+  most wanted. `/healthz` is exempt from the limit, so Compose would have gone on
+  reporting the container healthy while it failed everything. It now fails open.
+- **An unreachable datastore would have taken the API down too.** Each log write parks a
+  worker thread until the pool gives up; unbounded, enough of them exhaust the thread
+  limiter that ordinary requests stop being served. Records are now dropped, loudly,
+  beyond 32 in flight.
+- `drain` awaited one snapshot of the pending writes, so a record started during the
+  drain was lost. It loops now.
+- `recent_requests` and a public `dsn` were production code existing only for tests.
+  Removed; the tests read `request_log` with SQL, as an operator would.
+
+### Take note
+
+- **Found by hand, not by any test: the health probe was rate-limiting itself.** Compose
+  checks every five seconds - twelve a minute against an allowance of ten - so the API
+  would have started refusing its own liveness probe and been marked unhealthy for
+  enforcing its own limit. `/healthz` is exempt from the allowance and still logged.
+  Nothing in the seam could have caught this; it needed the real stack.
+- **Failing open is a decision with a cost**, and it is recorded only here and in a
+  docstring. Anyone who can make Redis unreachable removes the rate limit. The
+  alternative makes a limiter outage a total outage, which is worse for everyone rather
+  than better for anyone - but it is a trade, and it may deserve an ADR before #12.
+- The window is keyed on each process's own clock, so instances with skewed clocks can
+  count into different windows. Inherent to a fixed window keyed this way.
+- `/healthz` is exempt and unauthenticated, so it can be called without limit, and each
+  call writes a log row.
+
+---
+
+## #10 — Radius filter
+
+`feat/keyset-pagination` · 2026-09-05 · 69 tests passing · 4 files, +179 −12
+
+### Done
+
+- `position` is a `geography(Point,4326)` column generated from latitude and longitude,
+  so the two cannot drift; a GiST index covers it.
+- Centre latitude, centre longitude and a radius in nautical miles are accepted together
+  and refused unless all three arrive.
+- `ST_DWithin` on the geography type measures across the spheroid, so a circle stays a
+  circle at any latitude.
+- Combines with MMSI, time interval and bounding box.
+- **Closes the item entry #5 handed to this ticket**: ADR-0003's geography column and
+  GiST index were described but absent from the schema. They exist now.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `tests/test_http_seam.py` | +78 | The radius, its sphere-correctness, the all-or-none rule, the combinations |
+| `src/vessel_tracking/api.py` | +59 −11 | Three parameters, the all-or-nothing validator, nautical miles to metres |
+| `src/vessel_tracking/store.py` | +27 | The `ST_DWithin` fragment and the circle invariant |
+| `db/001_schema.sql` | +15 −1 | The generated column, the GiST index, and what the planner actually does with it |
+
+### Verified
+
+- Full suite 69 passed, mypy strict clean, `git diff --check` clean.
+- The expected counts come from a haversine distance computed in Python, not from asking
+  the database twice. 967 reports lie within 115 nautical miles of the test centre; a
+  flat comparison in degrees would return 714, so the number distinguishes a circle on
+  the sphere from a rectangle wearing its name. The nearest report is 8 nautical miles
+  from the edge, far outside the ~0.6 nm that sphere and spheroid can disagree by.
+- **Measured, and it contradicted what I had written.** I first commented that this index,
+  like the composite one, would not earn its place at 2,696 rows. `EXPLAIN ANALYZE` says
+  otherwise: the GiST index is used at every radius tried - bitmap index scan for wide
+  circles, plain index scan for narrow ones - because `ST_DWithin` costs enough per row
+  that the planner reaches for it even at this volume. The comment now says that.
+
+### Review caught
+
+- **`ReportFilter` could be built as a partial circle, and both broken states failed
+  silently.** A radius with no centre becomes `ST_MakePoint(NULL, NULL)`, so the
+  predicate is NULL and every row is filtered out - an empty page with a 200. A centre
+  with no radius emits no fragment at all and is quietly ignored. That is exactly what
+  the API validator's own docstring calls worse than refusing, one layer down. The
+  dataclass now refuses it too.
+- **The combination test was largely vacuous.** The circle already holds one Vessel's
+  reports and no other's, so pairing it with that same Vessel removed nothing while
+  looking like a combination; the narrowing came entirely from the time bound. And no
+  bounding-box leg was tested at all, though the acceptance criterion names it. Each leg
+  now narrows something the circle did not.
+
+### Take note
+
+- **The circle invariant is deliberately untested.** A test would have to construct a
+  `ReportFilter` directly, and issue #1's testing decisions permit exactly one kind of
+  below-seam test - table-driven AIS decoding - and say that reaching beneath a seam is
+  otherwise not wanted. The guard exists to stop a future caller failing silently; it is
+  not reachable through the seam because the API refuses a partial circle first.
+- **Two changes to #8's error contract, made here for this ticket's rule.**
+  `InvalidParameter.parameter` is now optional, because a rule about the whole request
+  has no single parameter at fault and naming one `"query"` was a lie. And pydantic's
+  `"Value error, "` prefix is stripped from every message. Both alter the published
+  schema for every route, not just this one.
+- The column is named `position`, which `CONTEXT.md` puts on the avoid list for Position
+  Report. Kept: here it means the coordinate rather than the record, it is schema-internal
+  and never served, and issue #1's schema table names it. Flagged so the choice is on the
+  record rather than an oversight.
+
+---
+
+## #7 — Content negotiation and CSV output
+
+`feat/keyset-pagination` · 2026-09-05 · 65 tests passing · 3 files, +364 −25
+
+### Done
+
+- Accept selects JSON or CSV, with a `format` parameter overriding it for callers who
+  cannot set a header.
+- CSV columns are `PositionReportResource.model_fields`, and every row is that
+  resource's own JSON form, so the two formats cannot drift in fields or rendering.
+- Streamed from a psycopg named cursor through `StreamingResponse`; nothing buffers.
+- Absent values are empty fields; Speed is knots; timestamps are ISO-8601 UTC in both.
+- The status is chosen before the first byte: the first report is pulled while a problem
+  document is still possible, which is the #8 carry-forward decided here.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `tests/test_http_seam.py` | +171 −1 | Negotiation, CSV shape, streaming, UTC rendering |
+| `src/vessel_tracking/api.py` | +155 −20 | Negotiation, CSV rendering, streaming response, UTC normalisation |
+| `src/vessel_tracking/store.py` | +38 −4 | `stream_reports` on a server-side cursor; the shared `_select` |
+
+### Verified
+
+- Full suite 65 passed, mypy strict clean, `git diff --check` clean.
+- Streaming confirmed as observable at the seam: a `limit=1000` CSV response carries no
+  `content-length`, which a buffered body would have to.
+
+### Review caught
+
+- **Accept was a substring search, not negotiation.** `text/csv;q=0` — an explicit
+  refusal — was served CSV, and `application/json, text/csv;q=0.1` preferred CSV over
+  the caller's stated preference. Now reads q-values: CSV has to be both wanted and
+  preferred, and a tie goes to JSON.
+- **The export could hold a pooled connection until the collector noticed.** The rows
+  were handed to `itertools.chain`, which has no `close()`, so closing the response's
+  generator could not reach the store's. The remaining reports are now passed as the
+  generator itself and closed in a `finally`, and a failure during priming closes it
+  before raising.
+- `content-disposition: attachment` was not asked for by the ticket and forces a
+  download on the very address-bar caller the override parameter exists for. Removed.
+- `stream_reports` had duplicated `list_reports`' whole statement; both now build it
+  from one `_select`.
+- The streaming property itself was untested, though issue #1 puts "CSV shape and
+  streaming" on the HTTP seam.
+
+### Take note
+
+- **One review claim was wrong and worth recording as wrong**: that an abandoned export
+  could stall ingest into backoff via pool exhaustion. The API and the consumer are
+  separate processes with separate pools, so an export cannot reach ingest. It can still
+  exhaust the API's own five connections, which is the real and narrower risk.
+- **CSV has no exhaustion signal.** JSON's `next_cursor` is null exactly when done; a
+  CSV caller gets a full page and cannot tell whether more exists without asking again.
+  A `Link: rel="next"` header would need the extra row known before the body starts, and
+  it is not. The AC asks that CSV honour the same ordering and paging, which it does -
+  but the two formats are not equally self-describing, and that is a real asymmetry.
+- **A mid-export failure still truncates a 200.** Decided rather than left open: the
+  status is chosen after the datastore has been reached and the first report pulled, so
+  everything except a failure part way through an export gets a problem document. There
+  is no way to retract a status already sent.
+- `STREAM_CHUNK` is 100 against a page cap of 1,000, so an export is a handful of
+  fetches. The cursor is there for the shape of the design, not for this volume.
+
+---
+
+## #8 — RFC 9457 error contract and UTC input handling
+
+`feat/keyset-pagination` · 2026-09-05 · 54 tests passing · 2 files, +293 −8
+
+### Done
+
+- One problem document for every failure: validation, not found, wrong method, and
+  anything unhandled. `application/problem+json` on the wire.
+- Structured validation detail inside the document as an `errors` extension member, with
+  `detail` left as the RFC's human-readable prose rather than a competing structure.
+- Each rejected parameter names itself, which is what the four separately named bounds
+  were for.
+- A bound without a timezone is read as UTC, and the assumption is stated on both
+  interval parameters, where a caller passes them.
+- The 500 document says nothing about the cause; the cause goes to the log.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `src/vessel_tracking/api.py` | +186 −7 | `Problem`, three exception handlers, the OpenAPI prune, header pass-through |
+| `tests/test_http_seam.py` | +107 −1 | Each failure mode, the repeated-parameter case, the published schema |
+
+### Verified
+
+- Full suite 54 passed, mypy strict clean, `git diff --check` clean.
+- Probed by hand: unknown path, wrong method, malformed query syntax, out-of-range
+  bound, bad value inside a repeated parameter, and an unhandled store failure. All
+  return the same document.
+
+### Review caught
+
+- **The document named the wrong thing for repeated parameters.** Pydantic locates a bad
+  list item as `("query", "mmsi", 0)`, and taking the last element told the caller to fix
+  a parameter called `"0"`. My tests only ever passed bad scalars, so the bug survived
+  them. Found by the reviewer running the app rather than reading it.
+- **The published schema advertised two formats — inside the ticket whose whole purpose
+  is to have one.** Declaring a response `model` makes FastAPI add an `application/json`
+  entry, and it carried the `Problem` schema while the media type actually returned
+  carried none. A client generated from that document would have expected the wrong one.
+- **405 lost its `Allow` header.** The handler dropped `failure.headers`, which Starlette's
+  default forwards. One shape everywhere is not worth breaking RFC 9110 for.
+- `HTTPStatus(code).phrase` raises on any non-IANA status, so a handler bug would have
+  surfaced as a 500 from inside the error handler.
+- `instance` was the path, identical on every rejected request to the collection. It now
+  carries the query string — the part that actually varied.
+- **A tautological assertion**, `"detail" not in document or isinstance(...)`, which could
+  not fail. The #5 entry records the review catching this same class of thing; that is
+  twice now, and both times in an assertion I wrote to look thorough.
+- A stale docstring on `_as_utc` still said this work belonged to a later ticket.
+
+### Take note
+
+- **Two failure modes still escape the contract, both latent.** A failure raised in the
+  lifespan produces no ASGI response at all, so no document is possible - unavoidable. A
+  failure *part way through a streaming response* sends 200 with a truncated body and no
+  document, because the status has already gone. There is no streaming endpoint today,
+  but **#7 adds one**: CSV streamed from a server-side cursor. Worth deciding there what
+  a mid-stream failure should look like.
+- **Unhandled failures are logged twice** under uvicorn: once by `log.exception` with the
+  request path, once by Starlette re-raising afterwards. Kept the contextual one.
+- No ADR. The spec already records RFC 9457 as the decision, and a second copy would only
+  be a second thing to keep in step - the same reasoning as the glossary entry.
+- `_as_utc` is now properly this ticket's, closing the item #5 and #6 both carried.
+
+---
+
+## Glossary — the six "missing" terms, and the one that was actually missing
+
+`feat/keyset-pagination` · 2026-09-05 · docs only
+
+Not an `/implement` run. This closes the Take note item that the #4, #5 and #6 entries
+each carried forward, and corrects it: the item was wrong.
+
+### Done
+
+- Added **Feed** to `CONTEXT.md`. It was used three times inside the glossary's own
+  definitions — "the source feed", "the raw feed's `stationId`", "the source feed
+  transmits it" — and defined nowhere. 39 uses across the code and ADRs.
+- Added a scope sentence to the glossary header saying what it deliberately excludes,
+  so this false gap stops being rediscovered.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `CONTEXT.md` | +11 −1 | The Feed entry, and a header sentence bounding what the glossary is for |
+| `docs/implementation-log.md` | this entry | Correcting a claim the log made three times |
+
+### What the earlier entries got wrong
+
+Three entries flagged six terms as glossary gaps: poison message, transient failure,
+bounding box, time interval, cursor, page size. Tested against the format's own rule —
+*only include terms specific to this project's context; general programming concepts do
+not belong even if the project uses them extensively* — **none of the six qualifies**.
+All six are general engineering vocabulary that this project happens to use.
+
+Two of them were already defined anyway. `poison message` and `transient failure` appear
+in bold in ADR-0004, which is where the decision that gives them meaning lives; copying
+them into the glossary would have created a second definition to keep in step with the
+first. `bounding box` and `time interval` turned out not to appear in `src/` or the ADRs
+at all — they are specification and test language, which is why they felt absent.
+
+Counting undefined terms is not the same as finding gaps. The measure that found the real
+one was different: which words do the glossary's own definitions lean on without
+defining. That test found exactly one, and it was not on the list.
+
+### Take note
+
+- **The recurring item is closed, not deferred.** If a future entry reports "glossary
+  gaps widening" over general vocabulary, this is the answer.
+- `Feed` is the only addition. `replay`, `redelivery`, `seam` and `offset` were
+  considered and left out on the same rule.
+- No ADR. Nothing here was hard to reverse or the result of a real trade-off.
+
+---
+
 ## #6 — Ordering and keyset pagination
 
 `feat/keyset-pagination` · 2026-09-05 · 46 tests passing · 4 files, +277 −95

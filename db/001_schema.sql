@@ -16,7 +16,13 @@ CREATE TABLE IF NOT EXISTS position_report (
     heading_degrees smallint,
     rate_of_turn    smallint,
     latitude        double precision NOT NULL,
-    longitude       double precision NOT NULL
+    longitude       double precision NOT NULL,
+    -- Generated rather than written, so it cannot drift from the coordinates it is
+    -- derived from. Latitude and longitude stay canonical; this is only how the
+    -- datastore is asked geographic questions about them.
+    position        geography(Point, 4326) GENERATED ALWAYS AS
+                        (ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography)
+                        STORED
 );
 
 -- MMSI is matched by equality and Reported Time by range, so the equality column leads;
@@ -30,3 +36,31 @@ CREATE TABLE IF NOT EXISTS position_report (
 -- rather than for this sample of it, and at production volume both plans change.
 CREATE INDEX IF NOT EXISTS position_report_mmsi_reported_at
     ON position_report (mmsi, reported_at);
+
+-- Radius search on the sphere. Measured with EXPLAIN ANALYZE over the supplied 2,696
+-- records, and the result differs from the composite index above: this one is used at
+-- every radius tried - a bitmap index scan for wide circles, a plain index scan for
+-- narrow ones. ST_DWithin costs enough per row that the planner reaches for the index
+-- even at this volume, which is the opposite of what the row count alone would suggest.
+CREATE INDEX IF NOT EXISTS position_report_position
+    ON position_report USING GIST (position);
+
+-- Every request that reached the API, including the ones it turned away: a log that
+-- omits refused traffic cannot show abuse, which is most of the reason to keep one.
+--
+-- The client is text rather than inet because it records whatever the transport
+-- reported, the same way a Position Report records what the feed said. A value that
+-- does not parse as an address is a fact about the request, not a reason to lose it.
+CREATE TABLE IF NOT EXISTS request_log (
+    id              bigserial   PRIMARY KEY,
+    received_at     timestamptz NOT NULL DEFAULT now(),
+    method          text        NOT NULL,
+    path            text        NOT NULL,
+    query           text,
+    client_ip       text        NOT NULL,
+    status          smallint    NOT NULL,
+    duration_ms     numeric(12,3) NOT NULL,
+    response_bytes  integer     NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS request_log_received_at ON request_log (received_at DESC);

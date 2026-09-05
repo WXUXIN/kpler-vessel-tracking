@@ -6,7 +6,7 @@ parameters and are never interpolated into query text.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -54,6 +54,21 @@ class ReportFilter:
     max_latitude: float | None = None
     min_longitude: float | None = None
     max_longitude: float | None = None
+    centre_latitude: float | None = None
+    centre_longitude: float | None = None
+    radius_metres: float | None = None
+
+    def __post_init__(self) -> None:
+        """A circle is all three of its parts or none of them.
+
+        The API refuses a partial circle before it gets here, but a filter built any
+        other way would fail quietly rather than loudly: a radius without a centre
+        compares against NULL and matches nothing, and a centre without a radius is
+        dropped. Both look exactly like a query that worked.
+        """
+        circle = (self.centre_latitude, self.centre_longitude, self.radius_metres)
+        if any(part is not None for part in circle) and None in circle:
+            raise ValueError("a circle needs a centre and a radius, or neither")
 
     def conditions(self) -> tuple[list[str], list[Any]]:
         """SQL fragments and the parameters that fill them, in step.
@@ -93,6 +108,18 @@ class ReportFilter:
             if bound is not None:
                 fragments.append(f"{column} {comparison} %s")
                 params.append(bound)
+        # On the geography type ST_DWithin measures across the spheroid, so a circle
+        # stays a circle at any latitude, and it can use the GiST index rather than
+        # computing a distance for every row. ST_MakePoint takes x then y: longitude
+        # before latitude, which is the opposite of how they are said aloud.
+        if self.radius_metres is not None:
+            fragments.append(
+                "ST_DWithin(position,"
+                " ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)"
+            )
+            params.extend(
+                [self.centre_longitude, self.centre_latitude, self.radius_metres]
+            )
         return fragments, params
 
 
@@ -110,12 +137,49 @@ _INSERT = f"""
 """
 
 
+# How many rows a server-side cursor hands over at a time. At today's page cap of 1,000
+# this is a handful of fetches rather than many: the cursor is here for the shape of the
+# design, not because this volume needs it.
+STREAM_CHUNK = 100
+
+
+@dataclass(frozen=True, slots=True)
+class RequestRecord:
+    """One request as the log keeps it: what was asked, and what came back."""
+
+    method: str
+    path: str
+    query: str | None
+    client_ip: str
+    status: int
+    duration_ms: float
+    response_bytes: int
+
+
+_RECORD_REQUEST = """
+    INSERT INTO request_log
+        (method, path, query, client_ip, status, duration_ms, response_bytes)
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
+"""
+
+
 class PositionReportStore:
     def __init__(self, dsn: str) -> None:
         self._pool = ConnectionPool(dsn, min_size=1, max_size=5, open=True)
 
     def close(self) -> None:
         self._pool.close()
+
+    @staticmethod
+    def _select(filters: ReportFilter) -> tuple[str, list[Any]]:
+        """The one statement both the paged read and the export are built from."""
+        fragments, params = filters.conditions()
+        where = f" WHERE {' AND '.join(fragments)}" if fragments else ""
+        return (
+            f"SELECT {_COLUMNS} FROM position_report{where}"
+            " ORDER BY report_id LIMIT %s",
+            params,
+        )
 
     def insert_many(self, reports: Sequence[PositionReport]) -> int:
         """Write a batch in one transaction. Returns the number of rows actually added.
@@ -152,6 +216,43 @@ class PositionReportStore:
         except psycopg.Error as failure:
             raise UnstorableReport(str(failure)) from failure
 
+    def stream_reports(
+        self, limit: int, filters: ReportFilter = ReportFilter()
+    ) -> Generator[PositionReport, None, None]:
+        """Position Reports one at a time, from a cursor held on the server.
+
+        The rows stay in the datastore until they are fetched, so exporting a large
+        result costs this process a chunk at a time rather than the whole set. The
+        A pooled connection is held for as long as the caller keeps iterating, so a
+        caller that stops early must close the iterator - closing it unwinds these
+        blocks and hands the connection back. This pool belongs to the API process
+        alone; the consumer has its own, so an abandoned export cannot reach ingest.
+        """
+        statement, params = self._select(filters)
+        with self._pool.connection() as conn:
+            with conn.cursor(
+                name="position_reports", row_factory=class_row(PositionReport)
+            ) as cur:
+                cur.itersize = STREAM_CHUNK
+                cur.execute(statement, (*params, limit))
+                yield from cur
+
+    def record_request(self, record: RequestRecord) -> None:
+        """Write one request to the log. Called off the response path."""
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                _RECORD_REQUEST,
+                (
+                    record.method,
+                    record.path,
+                    record.query,
+                    record.client_ip,
+                    record.status,
+                    record.duration_ms,
+                    record.response_bytes,
+                ),
+            )
+
     def count(self) -> int:
         with self._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM position_report")
@@ -170,16 +271,13 @@ class PositionReportStore:
     def list_reports(
         self, limit: int, filters: ReportFilter = ReportFilter()
     ) -> list[PositionReport]:
-        """Position Reports in Report ID order - the trustworthy sequence (ADR-0006)."""
-        fragments, params = filters.conditions()
-        # Only the fragments reach the statement text, and they are fixed strings from
-        # ReportFilter itself. Everything a caller supplied travels as a parameter.
-        where = f" WHERE {' AND '.join(fragments)}" if fragments else ""
+        """Position Reports in Report ID order - the trustworthy sequence (ADR-0006).
+
+        Only fixed fragments from ReportFilter reach the statement text; everything a
+        caller supplied travels as a parameter.
+        """
+        statement, params = self._select(filters)
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=class_row(PositionReport)) as cur:
-                cur.execute(
-                    f"SELECT {_COLUMNS} FROM position_report{where}"
-                    " ORDER BY report_id LIMIT %s",
-                    (*params, limit),
-                )
+                cur.execute(statement, (*params, limit))
                 return cur.fetchall()

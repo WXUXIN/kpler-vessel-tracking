@@ -29,3 +29,10 @@ class Settings(BaseSettings):
     # what a service wants; a demonstration run or an end-to-end test sets a value so
     # that it terminates deterministically.
     idle_timeout_seconds: float = 0.0
+
+    redis_url: str = "redis://localhost:6379/0"
+
+    # Requests allowed per client per window. Ten a minute is deliberately low enough
+    # that the limit can be demonstrated by hand rather than only under load.
+    rate_limit_allowance: int = 10
+    rate_limit_window_seconds: int = 60

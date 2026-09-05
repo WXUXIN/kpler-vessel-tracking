@@ -11,6 +11,7 @@ dependencies = [
     "ijson>=3.3",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
+    "redis>=5.2",
 ]
 
 [project.optional-dependencies]
@@ -18,7 +19,7 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "httpx>=0.28",
-    "testcontainers[postgres]>=4.8",
+    "testcontainers[postgres,redis]>=4.8",
     "mypy>=1.13",
 ]
 

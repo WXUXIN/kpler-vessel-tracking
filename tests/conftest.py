@@ -1,5 +1,7 @@
 import json
+import os
 import pathlib
+import uuid
 from collections.abc import Iterator, Mapping
 from typing import Any, Callable
 
@@ -7,8 +9,11 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 from testcontainers.postgres import PostgresContainer
+from testcontainers.redis import RedisContainer
 
 from vessel_tracking.domain import RejectedReport
+from vessel_tracking.limits import Limits
+from vessel_tracking.settings import Settings
 from vessel_tracking.ingest import ingest_messages
 from vessel_tracking.producer import encode, messages_to_publish
 from vessel_tracking.store import PositionReportStore
@@ -24,13 +29,44 @@ def dsn() -> Iterator[str]:
     The seam tests use a real database rather than a fake because the behaviour most
     worth testing - conflict handling on insert, and the filter predicates - is exactly
     what a fake would accept and a real database would reject.
+
+    CI supplies one as a service container and says so through the environment; a
+    developer with only Docker gets a fresh one started for them. The schema is applied
+    either way, but only the started one is guaranteed empty: every statement in
+    `db/001_schema.sql` is IF NOT EXISTS, so pointing this at a database that already
+    has an older schema will quietly leave it as it is.
     """
+    provided = os.environ.get("VT_TEST_DATABASE_URL")
+    if provided:
+        apply_schema(provided)
+        yield provided
+        return
     with PostgresContainer("postgis/postgis:16-3.4", driver=None) as postgres:
         url = postgres.get_connection_url()
-        with psycopg.connect(url) as conn:
-            conn.execute(SCHEMA.read_text())
-            conn.commit()
+        apply_schema(url)
         yield url
+
+
+def apply_schema(url: str) -> None:
+    with psycopg.connect(url) as conn:
+        conn.execute(SCHEMA.read_text())
+        conn.commit()
+
+
+@pytest.fixture(scope="session")
+def redis_url() -> Iterator[str]:
+    """A real Redis, for the same reason PostgreSQL is real.
+
+    A fixed window is one INCR and one EXPIRE racing each other; a fake would accept
+    any ordering of those, which is precisely the part worth testing.
+    """
+    provided = os.environ.get("VT_TEST_REDIS_URL")
+    if provided:
+        yield provided
+        return
+    with RedisContainer("redis:7-alpine") as container:
+        host = container.get_container_host_ip()
+        yield f"redis://{host}:{container.get_exposed_port(6379)}/0"
 
 
 @pytest.fixture
@@ -84,7 +120,7 @@ def dead_letters() -> RecordingDeadLetters:
 @pytest.fixture
 def store(dsn: str) -> Iterator[PositionReportStore]:
     with psycopg.connect(dsn) as conn:
-        conn.execute("TRUNCATE position_report")
+        conn.execute("TRUNCATE position_report, request_log")
         conn.commit()
     store = PositionReportStore(dsn)
     yield store
@@ -92,10 +128,28 @@ def store(dsn: str) -> Iterator[PositionReportStore]:
 
 
 @pytest.fixture
-def client(store: PositionReportStore) -> Iterator[TestClient]:
+def client(store: PositionReportStore, redis_url: str) -> Iterator[TestClient]:
     from vessel_tracking.api import create_app
 
-    with TestClient(create_app(store)) as test_client:
+    # A fresh namespace per test, so one test cannot spend another's allowance, and an
+    # allowance high enough that paging through a result is not mistaken for abuse.
+    # The limit itself has its own client below.
+    limits = Limits(url=redis_url, allowance=1000, namespace=f"test-{uuid.uuid4()}")
+    with TestClient(create_app(store, limits=limits)) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def limited_client(store: PositionReportStore, redis_url: str) -> Iterator[TestClient]:
+    """A client held to the allowance the system actually ships with."""
+    from vessel_tracking.api import create_app
+
+    limits = Limits(
+        url=redis_url,
+        allowance=Settings().rate_limit_allowance,
+        namespace=f"test-{uuid.uuid4()}",
+    )
+    with TestClient(create_app(store, limits=limits)) as test_client:
         yield test_client
 
 

@@ -14,6 +14,9 @@ x-app-env: &app-env
   VT_INGEST_BATCH_SIZE: ${VT_INGEST_BATCH_SIZE:-500}
   VT_INGEST_BATCH_SECONDS: ${VT_INGEST_BATCH_SECONDS:-1.0}
   VT_IDLE_TIMEOUT_SECONDS: ${VT_IDLE_TIMEOUT_SECONDS:-0}
+  VT_REDIS_URL: ${VT_REDIS_URL:-redis://redis:6379/0}
+  VT_RATE_LIMIT_ALLOWANCE: ${VT_RATE_LIMIT_ALLOWANCE:-10}
+  VT_RATE_LIMIT_WINDOW_SECONDS: ${VT_RATE_LIMIT_WINDOW_SECONDS:-60}
 
 services:
   postgres:
@@ -26,7 +29,14 @@ services:
     volumes:
       - ./db/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${VT_POSTGRES_USER:-vessel} -d ${VT_POSTGRES_DB:-vessel_tracking}"]
+      # Over TCP on purpose. Measured against this image with a slow init script:
+      # pg_isready, and psql over the unix socket, both report success from about four
+      # seconds - while initdb's temporary server is still running, TCP is refused, and
+      # the schema in /docker-entrypoint-initdb.d has not been applied. Only a TCP
+      # connection waits for the real server, and it becomes available at the same
+      # moment the tables do. A dependent that waits on the socket check would start
+      # against a database with no position_report in it.
+      test: ["CMD-SHELL", "PGPASSWORD=${VT_POSTGRES_PASSWORD:-vessel} psql -h 127.0.0.1 -U ${VT_POSTGRES_USER:-vessel} -d ${VT_POSTGRES_DB:-vessel_tracking} -c 'SELECT 1'"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -56,6 +66,15 @@ services:
       retries: 20
       start_period: 20s
 
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   consumer:
     build: .
     command: vt-consumer
@@ -72,6 +91,7 @@ services:
     ports: ["8000:8000"]
     depends_on:
       postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')\""]
       interval: 5s

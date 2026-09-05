@@ -1,0 +1,75 @@
+name: tests
+
+# Every push and every pull request. A suite that only runs when someone remembers to
+# ask is not a gate, and the point of this one is to show the tests passing somewhere
+# other than the author's machine.
+on:
+  push:
+  pull_request:
+
+# A superseded push has nothing left to prove. Runs for the same ref are cancelled when
+# a newer one arrives; a same-repo pull request still runs twice, once for each event,
+# which is the cost of honouring both triggers as the ticket asks.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+
+    # The same images Compose runs, so CI is not testing a different database from the
+    # one the system is developed and demonstrated against. PostGIS in particular:
+    # plain PostgreSQL would fail on the geography column before a single test ran.
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: vessel
+          POSTGRES_PASSWORD: vessel
+          POSTGRES_DB: vessel_tracking
+        ports:
+          - 5432:5432
+        # Over TCP on purpose. Both pg_isready and psql over the unix socket report
+        # success while initdb's temporary server is still up, TCP is refused and the
+        # schema has not been applied - measured at about twelve seconds of false
+        # confidence against this image. Only a TCP connection waits for the server the
+        # tests will actually use.
+        options: >-
+          --health-cmd "PGPASSWORD=vessel psql -h 127.0.0.1 -U vessel -d vessel_tracking -c 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      VT_TEST_DATABASE_URL: postgresql://vessel:vessel@localhost:5432/vessel_tracking
+      VT_TEST_REDIS_URL: redis://localhost:6379/0
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: pip install -e '.[dev]'
+
+      - name: Typecheck
+        run: mypy
+
+      # The Compose smoke test is excluded: it builds images and drives a whole stack,
+      # which is a different question from whether the code is correct, and it needs a
+      # broker this job deliberately does not run.
+      - name: Test
+        run: pytest -m "not compose" -q
