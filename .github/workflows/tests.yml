@@ -29,7 +29,7 @@ jobs:
           POSTGRES_PASSWORD: vessel
           POSTGRES_DB: vessel_tracking
         ports:
-          - 5432:5432
+          - 5433:5432
         # Over TCP on purpose. Both pg_isready and psql over the unix socket report
         # success while initdb's temporary server is still up, TCP is refused and the
         # schema has not been applied - measured at about twelve seconds of false

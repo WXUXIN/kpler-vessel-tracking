@@ -14,7 +14,53 @@ Append new entries directly below this line.
 
 ---
 
-## Demo front-end at `/ui`
+## Postgres published on 5433, not 5432
+
+`feat/demo-frontend` · 2026-09-06 · not a ticket, asked for directly
+
+Asked for directly: Postgres reachable on the host at 5432. It already was, on paper —
+`docker-compose.yml` has said `5432:5432` since the tracer bullet. It wasn't reachable in
+practice, because this machine runs a native Homebrew PostgreSQL 17 bound to
+`127.0.0.1:5432`/`::1:5432`, which macOS resolves ahead of Docker's `0.0.0.0:5432` for
+anything connecting via `localhost`. `docker port` reported the container bound and
+healthy the whole time; `psql -h localhost -p 5432` was silently reaching the *other*
+Postgres instead (confirmed: it answered `role "vessel" does not exist`, which belongs to
+neither database).
+
+Given the choice between stopping the native service, reconfiguring it, or moving this
+project's container instead, the container moved: lowest blast radius, and every other
+project relying on the native install keeps working untouched.
+
+### Done
+
+- `docker-compose.yml` and `.github/workflows/tests.yml`: Postgres published on
+  `5433:5432`. The internal Docker-network address (`postgres:5432`, used by every
+  container-to-container connection) is unchanged — only the host-side publish moved.
+- `settings.py`'s `database_url` default (used only when `VT_DATABASE_URL` is unset,
+  i.e. running a component directly on the host rather than via Compose) updated to
+  `localhost:5433` to match, so it can't silently resolve to the native Postgres instead.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `docker-compose.yml` | 1 line | Publish Postgres on host port 5433 instead of 5432 |
+| `.github/workflows/tests.yml` | 1 line | Same, so the CI service container matches |
+| `src/vessel_tracking/settings.py` | 1 line | Host-side fallback DSN updated to match |
+
+### Verified
+
+- `psql "postgresql://vessel:vessel@localhost:5433/vessel_tracking"` reaches the
+  container (confirmed against the `vessel` role and schema); `localhost:5432` still
+  reaches the native install, as expected, and is no longer this project's concern.
+
+### Take note
+
+- **This is a per-machine port conflict, not a project decision.** On a machine without
+  a native Postgres already on 5432, the compose file would work unmodified at 5432. If
+  that ever changes here (the native install is stopped or moved), the values in the two
+  files above are the only things to revert.
+
 
 `feat/demo-frontend` · 2026-09-05 · not a ticket, asked for directly
 
