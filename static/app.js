@@ -12,6 +12,10 @@ const VESSELS = [
 const FULL_RANGE = { from: "2013-06-30T23:34", to: "2013-07-01T17:45" };
 const BUSY_MINUTE = { from: "2013-07-01T17:43", to: "2013-07-01T17:44" };
 
+// Every automatic zoom is capped: a result set that is one point, or a hundred points
+// a mile apart, should still leave enough coastline on screen to say where it is.
+const FIT = { maxZoom: 11 };
+
 const state = {
   lastItems: [],
   nextCursor: null,
@@ -195,7 +199,7 @@ function renderQueryPoints(items, { append }) {
 
   if (!append && items.length) {
     const bounds = L.latLngBounds(items.map((i) => [i.latitude, i.longitude]));
-    map.fitBounds(bounds.pad(0.2));
+    map.fitBounds(bounds.pad(0.2), FIT);
   }
 }
 
@@ -274,7 +278,7 @@ async function loadOverview() {
     state.overviewLayers.push(line);
     allBounds.push(...latlngs);
   }
-  if (allBounds.length) map.fitBounds(L.latLngBounds(allBounds).pad(0.1));
+  if (allBounds.length) map.fitBounds(L.latLngBounds(allBounds).pad(0.1), FIT);
 }
 
 function updateRadiusCircle() {
@@ -310,7 +314,7 @@ function drawTrack(order) {
     opacity: 0.95,
     dashArray: order === "reported_at" ? "2 6" : null,
   }).addTo(map);
-  map.fitBounds(state.trackLayer.getBounds().pad(0.2));
+  map.fitBounds(state.trackLayer.getBounds().pad(0.2), FIT);
 }
 
 async function loadFullTrack() {
@@ -443,7 +447,15 @@ function wireControls() {
 }
 
 function init() {
-  map = L.map("map", { preferCanvas: true }).setView([38.9, 23.2], 5);
+  // minZoom and maxBounds together stop the view ever reaching the zoom levels where
+  // the world is narrower than the pane and Leaflet tiles repeated copies of it
+  // sideways; noWrap on the layer below refuses to fetch those copies at all.
+  map = L.map("map", {
+    preferCanvas: true,
+    minZoom: 3,
+    maxBounds: L.latLngBounds([-85, -180], [85, 180]),
+    maxBoundsViscosity: 0.75,
+  }).setView([38.9, 23.2], 5);
   // Standard OSM tiles worked in development but started returning their "Access
   // denied" placeholder under repeated automated testing (see
   // https://operations.osmfoundation.org/policies/tiles/ — bulk/scripted use isn't
@@ -454,6 +466,7 @@ function init() {
     {
       attribution: "&copy; Esri &mdash; Esri, DeLorme, NAVTEQ",
       maxZoom: 16,
+      noWrap: true,
     },
   ).addTo(map);
 

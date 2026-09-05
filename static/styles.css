@@ -25,6 +25,15 @@ html, body {
   font-size: 14px;
 }
 
+/* An app shell, not a document: the page is exactly the viewport, and each pane
+   scrolls inside itself. Sizing the map as a percentage of a page that grows with the
+   row count gave a map a thousand pixels tall showing a 256-pixel world. */
+body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 code {
   font-family: var(--mono);
   background: var(--panel-raised);
@@ -86,7 +95,8 @@ code {
 .layout {
   display: grid;
   grid-template-columns: 320px 1fr;
-  min-height: calc(100vh - 76px);
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .sidebar {
@@ -96,7 +106,7 @@ code {
   flex-direction: column;
   gap: 1rem;
   overflow-y: auto;
-  max-height: calc(100vh - 76px);
+  min-height: 0;
 }
 
 .panel {
@@ -210,11 +220,12 @@ button.primary:hover { background: var(--accent); }
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
 }
 
 #map {
-  flex: 1 1 55%;
-  min-height: 320px;
+  flex: 1 1 auto;
+  min-height: 0;
   background: #0a0f1a;
 }
 
@@ -271,9 +282,12 @@ button.primary:hover { background: var(--accent); }
   overflow-y: auto;
 }
 
+/* A fixed share of the viewport that scrolls internally, so a thousand rows and ten
+   rows give the map the same amount of room. */
 .results {
-  flex: 1 1 45%;
+  flex: 0 0 38%;
   overflow: auto;
+  min-height: 0;
   padding: 0.75rem 1rem 1rem;
 }
 
@@ -320,7 +334,12 @@ footer a { color: var(--accent); }
   color: var(--text);
 }
 
+/* Narrow screens stack the panes, which cannot all fit a viewport at once - so the
+   page goes back to scrolling as a document, and the panes take fixed heights. */
 @media (max-width: 860px) {
+  body { overflow: auto; }
   .layout { grid-template-columns: 1fr; }
-  .sidebar { max-height: none; border-right: none; border-bottom: 1px solid var(--border); }
+  .sidebar { overflow-y: visible; border-right: none; border-bottom: 1px solid var(--border); }
+  #map { height: 55vh; flex: 0 0 auto; }
+  .results { flex: 0 0 auto; overflow-x: auto; }
 }
