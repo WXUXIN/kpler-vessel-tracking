@@ -17,4 +17,4 @@ def read_feed(path: Path) -> Iterator[Mapping[str, Any]]:
     """
     with path.open("rb") as handle:
         for message in ijson.items(handle, "item"):
-            yield message 
+            yield message

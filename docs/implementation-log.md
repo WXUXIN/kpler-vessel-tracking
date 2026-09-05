@@ -6,13 +6,17 @@ needing a human decision, the deliberate deviations, and the gaps a later ticket
 inherits. If an entry has nothing under Take note, say so explicitly rather than
 dropping the heading.
 
+**Files changed** lists every path in the commit with what its change was for, so a
+review knows where to look without reading the diff first. Anything unintended that
+slipped in belongs there too, named as such.
+
 Append new entries directly below this line.
 
 ---
 
 ## #4 — Consumer hardening: batching, manual offsets, failure taxonomy, ingest counters
 
-`aea3b93` · 2026-09-05 · 31 tests passing
+`aea3b93` · 2026-09-05 · 31 tests passing · 9 files, +399 −47
 
 ### Done
 
@@ -25,9 +29,22 @@ Append new entries directly below this line.
   write blocks the poll loop while it waits, which is the intended trade.
 - Shutdown abandons the pending batch instead of retrying forever, so SIGTERM during a
   datastore outage now terminates. The batch kept its place on the topic.
-- Batch size, batch time bound and idle timeout moved into `Settings` (with matching
-  entries in `.env.example` and `docker-compose.yml`).
+- Batch size, batch time bound and idle timeout moved into `Settings`.
 - Consumer exits on a configurable idle period and names the reason in its summary.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `src/vessel_tracking/consumer.py` | +99 −33 | Manual offset commits, `checkpoint()` ordering, progress reporting off totals, idle exit, guarded shutdown, JSON default for decoded reports |
+| `src/vessel_tracking/ingest.py` | +101 −4 | `Backoff`, the retry loop, the report-by-report fallback, the `stopping` predicate |
+| `src/vessel_tracking/store.py` | +37 −4 | `TransientFailure` vs `UnstorableReport` classification of psycopg errors |
+| `src/vessel_tracking/settings.py` | +10 | `ingest_batch_size`, `ingest_batch_seconds`, `idle_timeout_seconds` |
+| `tests/test_ingest_seam.py` | +122 −5 | Crash-and-replay pair, transient retry, the refused-row case, `FlakyStore` |
+| `tests/test_compose_smoke.py` | +17 | Idle-exit test against the real stack |
+| `.env.example` | +9 | The three new settings, documented |
+| `docker-compose.yml` | +3 | Same three passed through to the services |
+| `src/vessel_tracking/feed.py` | +1 −1 | **Unintended.** A trailing space an editor added, swept in by `git add -A`. Reverted. |
 
 ### Verified
 
@@ -69,12 +86,14 @@ Append new entries directly below this line.
 - Two crash-and-replay seam tests passed the moment they were written; the idempotency
   they assert arrived with the primary key in #2. They are here because this ticket is
   what makes the replay actually happen.
+- **`git add -A` let a stray whitespace edit into the commit.** Caught only when this
+  log was written. Worth `git diff --stat` before committing.
 
 ---
 
 ## #3 — Validation, Rejected Reports, and the dead-letter path
 
-`d3bddc3` · 2026-09-04 · 26 tests passing
+`d3bddc3` · 2026-09-04 · 26 tests passing · 12 files, +583 −72
 
 ### Done
 
@@ -88,6 +107,23 @@ Append new entries directly below this line.
   table-driven alongside empty Rate of Turn.
 - Rejection reasons name the domain concept, not the wire field — "reported time", not
   "timestamp", per CONTEXT.md's avoid list.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `src/vessel_tracking/domain.py` | +171 −14 | The validation rules, `InvalidReport`, `RejectedReport`, the AIS sentinels, `malformed_messages` and the violation table |
+| `src/vessel_tracking/consumer.py` | +115 −25 | `KafkaDeadLetters`, both counters in the logs, undecodable-payload routing |
+| `src/vessel_tracking/ingest.py` | +50 −7 | `DeadLetters` protocol, `reject()`, the rejected counter |
+| `src/vessel_tracking/producer.py` | +41 −3 | `--inject-invalid`, `messages_to_publish`, split summary counters |
+| `src/vessel_tracking/settings.py` | +1 | `kafka_dead_letter_topic` |
+| `tests/test_ingest_seam.py` | +99 −10 | Rejection through the seam, the per-rule table, injection |
+| `tests/test_ais_decoding.py` | +51 | New: the table-driven AIS cases absent from the sample |
+| `tests/conftest.py` | +31 −6 | `RecordingDeadLetters`, the stream fixture now mirrors the producer |
+| `tests/test_http_seam.py` | +17 −7 | Call sites updated for the required sink |
+| `tests/test_compose_smoke.py` | +3 | Build the profiled producer so the smoke test cannot run a stale image |
+| `.env.example` | +3 | Dead-letter topic documented |
+| `docker-compose.yml` | +1 | Dead-letter topic passed through |
 
 ### Verified
 
@@ -129,7 +165,15 @@ Append new entries directly below this line.
 - The three test seams every later ticket builds on: ingest, HTTP, Compose smoke.
 - Schema shipped deliberately incomplete; later tickets edit it directly (ADR-0005).
 
+### Files changed
+
+Whole-repo scaffolding: `src/vessel_tracking/` (domain, feed, ingest, store, producer,
+consumer, api, settings), `db/001_schema.sql`, `tests/` (conftest and the three seams),
+`Dockerfile`, `docker-compose.yml`, `.env.example`, `pyproject.toml`. Run
+`git show --stat 8a57a50 76f86d4` for the exact list.
+
 ### Take note
 
-- Entry reconstructed from commit messages after the fact, so it has no Review-caught or
-  Verified detail. Later entries are written during the run.
+- Entry reconstructed from commit messages after the fact, so it has no Verified or
+  Review-caught detail and no per-file reasons. Later entries are written during the
+  run, which is the point of the convention in `AGENTS.md`.

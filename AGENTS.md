@@ -11,8 +11,15 @@ Single-context layout: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/ag
 ### Implementation log
 
 After every `/implement` run, append an entry at the top of `docs/implementation-log.md`
-and commit it with the work. Sections: **Done**, **Verified**, **Review caught**, **Take
-note**. Take note is the point of the file - deliberate deviations, gaps left open,
-anything a review raised that you pushed back on, and anything a later ticket inherits.
-Write it during the run rather than reconstructing it afterwards, and never leave the
-section empty without saying there is nothing in it.
+and commit it with the work. Sections: **Done**, **Files changed**, **Verified**,
+**Review caught**, **Take note**.
+
+Files changed is a table of every path in the commit with its line counts and what the
+change was for, so a review knows where to look without reading the diff first; get the
+counts from `git show --numstat` rather than estimating, and name anything that slipped
+in unintentionally as such.
+
+Take note is the point of the file - deliberate deviations, gaps left open, anything a
+review raised that you pushed back on, and anything a later ticket inherits. Write the
+entry during the run rather than reconstructing it afterwards, and never leave a section
+empty without saying there is nothing in it.
