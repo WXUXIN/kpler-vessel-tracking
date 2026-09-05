@@ -14,6 +14,84 @@ Append new entries directly below this line.
 
 ---
 
+## #5 — Position Report filters: MMSI, time interval, bounding box
+
+`feat/position-report-filters` · 2026-09-05 · 40 tests passing · 6 files, +328 −40
+
+### Done
+
+- MMSI as a repeated query parameter, one Vessel or many, via `mmsi = ANY(%s)`.
+- Half-open time interval: lower bound inclusive, upper exclusive.
+- Bounding box as four separately named bounds, each individually validated.
+- Every filter optional, and all of them compose with AND in one request.
+- Composite `(mmsi, reported_at)` index, equality column leading.
+- Filter values reach the database only as parameters; the statement text is assembled
+  from fixed fragments defined inside `ReportFilter` and nothing else.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `tests/test_http_seam.py` | +178 −32 | Every filter and their combinations; existing tests moved onto the shared fixture |
+| `src/vessel_tracking/store.py` | +63 −3 | `ReportFilter` and `conditions()`, the fragment-and-parameter composition |
+| `src/vessel_tracking/api.py` | +53 −5 | Seven query parameters, `_as_utc`, filter construction |
+| `db/001_schema.sql` | +12 | The composite index, and an honest note on what the planner does with it |
+| `tests/conftest.py` | +17 | `ingested_client`, the feed already loaded behind the API |
+| `AGENTS.md` | +5 | `git diff --check` before committing, after whitespace slipped in twice |
+
+### Verified
+
+- Full suite 40 passed, mypy strict clean, `git diff --check` clean.
+- **Measured rather than assumed**: `EXPLAIN ANALYZE` over the real 2,696 records shows
+  the composite index is used for an MMSI-and-window query (bitmap index scan) and is
+  *not* used for MMSI alone — one Vessel is 36% of the table, so a sequential scan wins.
+  Recorded beside the index in `db/001_schema.sql`.
+
+### Review caught
+
+- **The index comment claimed a plan the measurement disproves.** It said the index
+  "seeks straight to one Vessel and then walks the time window inside it"; the actual
+  plan is a bitmap index scan, and for MMSI alone there is no index scan at all. Parent
+  requirement 60 asks for exactly the opposite of that: the limits stated honestly, not
+  claims a query plan would disprove. Rewritten to say what was measured.
+- **The bounding box test proved almost nothing.** The box enclosed one Vessel's whole
+  track, and `min_longitude` alone isolates that Vessel, so three of the four bounds
+  could have been dropped and the test would still have passed. Its coordinate
+  assertions restated the filter over data wholly inside the box, so they could not fail
+  independently. Replaced with a box that clips the track, plus a test that exercises
+  each bound alone against data spanning it in both directions.
+- No closed-interval test: both bounds were only ever sent separately, though together
+  is the ordinary case and the one the index serves. Added.
+- **Invented Vessel names.** Test constants were `ANCONA`, `LEVANT`, `TUNIS` — made up
+  from the geography. CONTEXT.md is explicit that the system holds no Vessel attribute
+  beyond the MMSI, so those names asserted knowledge that does not exist. Renamed to
+  `NORTHERN_VESSEL` / `EASTERN_VESSEL` / `WESTERN_VESSEL`, which is true of the data.
+- The trailing-whitespace artifact struck again, in `producer.py`, a file this ticket
+  does not touch — exactly what #4's Take note predicted. Reverted, and prevented rather
+  than noted a second time: `AGENTS.md` now requires `git diff --check`.
+
+### Take note
+
+- **The endpoint signature is at seven query parameters and will roughly double.** The
+  review argues it is already the wrong shape and wants a FastAPI query-parameter model.
+  Deferred on purpose: collapsing it now still needs the mapping into `ReportFilter`, so
+  it trades one indirection for another before the need is real. Revisit at #6 (paging)
+  or #10 (radius), whichever adds parameters first.
+- **`_as_utc` is #8's acceptance criterion, shipped here.** A naive bound compared in the
+  server's zone answers a different question, and this is the ticket that first makes
+  time filtering possible. It now has a seam test, but #8 still owns documenting the
+  assumption and the error contract around bad input. Revert it into #8 if you would
+  rather keep the tickets clean.
+- The `AGENTS.md` change is unrelated to filters and was flagged as scope creep. Kept
+  deliberately: the problem it prevents occurred inside this ticket.
+- **Glossary gaps widening.** "Bounding box" and "time interval" are now user-facing
+  vocabulary absent from `CONTEXT.md`, alongside "poison message" and "transient
+  failure" from #4. Worth one `/domain-modeling` pass before #12.
+- ADR-0003's geography column and GiST index are still absent from the schema; the
+  radius filter (#10) owns them. Surfaced by the review, not a divergence.
+
+---
+
 ## #4 — Consumer hardening: batching, manual offsets, failure taxonomy, ingest counters
 
 `aea3b93` · 2026-09-05 · 31 tests passing · 9 files, +399 −47
