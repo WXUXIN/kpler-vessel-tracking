@@ -14,6 +14,84 @@ Append new entries directly below this line.
 
 ---
 
+## #12 — Documentation: README, design decisions, and dataset observations
+
+`feat/documentation` · 2026-09-05 · 73 tests passing · 4 files, +420 −5
+
+### Done
+
+- A README with the two sections the exercise names by title, the reasoning behind them,
+  the dataset observations that shaped the design, and what was deferred on purpose.
+- Every command in it was run before it was written down.
+- ADR-0007 records the rate limiter failing open, closing an item #9 flagged for
+  "before #12".
+- The glossary, the ADRs, the log and the dataset analysis are all linked.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `README.md` | +386 −1 | The document a reviewer reads |
+| `docs/adr/0007-the-rate-limiter-fails-open.md` | +38 | The trade the README names, recorded where decisions live |
+| `docs/adr/0003-…postgis….md` | +18 −4 | Correcting a prediction the query planner disproves |
+
+### Verified
+
+- 73 tests passing, mypy strict clean, `git diff --cached --check` clean.
+- Every documented command was executed: `up --wait`, both producer invocations, the
+  curl calls, the dead-letter console consumer, and the idle-timeout consumer run.
+- Every figure was checked against `docs/dataset-observations.md`, the schema or the
+  tests. The review re-checked all of them independently and found none wrong.
+
+### The acceptance criterion I did not meet as written
+
+One criterion asked the README to state "that the indexes are justified by the query
+shape at scale **and will not be used at this data volume**". The second half is a
+factual prediction, and `EXPLAIN ANALYZE` disproves it for two of the three query shapes:
+MMSI alone is a sequential scan as predicted, but MMSI with a time window uses the
+composite index, and every radius tried uses the GiST index. The deciding factor is cost
+per row, not row count - a btree equality test on a three-valued column saves nothing,
+while `ST_DWithin` on a geography is expensive enough per row to pay for the index over
+2,696 of them.
+
+Writing the sentence would have satisfied this criterion while breaking the parent's
+story 60: "the limits of that indexing at this data volume stated honestly, so that I am
+not shown claims a query plan would disprove". So the README keeps the first half plainly,
+gives the measured breakdown, and names the one case that does degrade to a scan.
+**ADR-0003 made the same unmeasured claim and has been corrected**, with a note saying it
+was written before anything was measured. Both review axes agreed this was the right call.
+
+### Review caught
+
+- **"Each service declares a healthcheck and each dependent waits on it" was false.** The
+  consumer and the producer declare none - they are dependents, not dependencies. Fixed
+  to say what is true.
+- The column table dropped `nav_status` and `course_degrees`, so two terms the glossary
+  defines - Navigational Status and Course - appeared nowhere in the README.
+- "One table, append-only" while the same README names `request_log` two sections earlier.
+- **Glossary drift in my own prose**: "by timestamp" and "the timestamps use", where
+  CONTEXT.md puts that word on the avoid list for Reported Time. The third time this
+  project has caught that exact drift, and this time in the document that tells everyone
+  else to use the glossary.
+- "Nothing is hard-coded" was too strong: the page size bounds and the pool size are.
+- The seams section claimed three seams and omitted the one agreed exception below them.
+
+### Take note
+
+- **The README documents a system on `main`.** Everything it describes is merged, and CI
+  has passed there.
+- **Not everything in the README was asked for by #12.** The API section and the testing
+  section were not; they serve the parent's stories about OpenAPI and CI, and they are
+  what makes it "the README a reviewer actually reads". Cut them if the brief is read
+  more narrowly.
+- The 967-versus-714 radius figures are the only numbers not regenerable from
+  `analysis/explore_feed.py`; they come from the test that asserts them.
+- `docs/dataset-observations.md` keeps its name, and the README keeps one heading using
+  the word "dataset", though CONTEXT.md avoids it for Feed. The ticket names the section
+  that way and the file predates the glossary entry; every other use now says Feed.
+
+---
+
 ## #11 — CI: run the test suite on every push
 
 `feat/keyset-pagination` · 2026-09-05 · 76 tests passing · 4 files, +112 −7
