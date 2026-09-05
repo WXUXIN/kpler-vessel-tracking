@@ -47,6 +47,7 @@ class ReportFilter:
     """
 
     mmsis: Sequence[int] = ()
+    after_report_id: int | None = None
     reported_from: datetime | None = None
     reported_to: datetime | None = None
     min_latitude: float | None = None
@@ -66,6 +67,12 @@ class ReportFilter:
         if self.mmsis:
             fragments.append("mmsi = ANY(%s)")
             params.append(list(self.mmsis))
+        # Keyset, not offset: the page resumes at a position in the ordering rather
+        # than counting rows, so inserts behind the cursor cannot shift a caller's
+        # place. Report ID only ever ascends, so this never skips a report (ADR-0006).
+        if self.after_report_id is not None:
+            fragments.append("report_id > %s")
+            params.append(self.after_report_id)
         # Half-open, so adjacent windows neither overlap nor double-count: a report
         # standing exactly on a bound belongs to the window that starts there.
         if self.reported_from is not None:

@@ -14,6 +14,8 @@ import urllib.request
 
 import pytest
 
+from vessel_tracking.api import MAX_PAGE_SIZE
+
 FEED_SIZE = 2696
 API = "http://localhost:8000/v1/position-reports"
 INGEST_TIMEOUT_SECONDS = 180
@@ -41,8 +43,23 @@ def _stored_report_count() -> int:
 
 
 def _served_report_count() -> int:
-    with urllib.request.urlopen(API, timeout=30) as response:
-        return len(json.load(response)["items"])
+    """Every Position Report the API will hand over, paged the way a caller must.
+
+    Pages are bounded, so counting one response counts one page. Paging to the end here
+    also puts the cursor through a real HTTP round trip rather than a test client.
+    """
+    total = 0
+    cursor: int | None = None
+    while True:
+        url = f"{API}?limit={MAX_PAGE_SIZE}" + (
+            f"&after={cursor}" if cursor is not None else ""
+        )
+        with urllib.request.urlopen(url, timeout=30) as response:
+            page = json.load(response)
+        total += len(page["items"])
+        cursor = page["next_cursor"]
+        if cursor is None:
+            return total
 
 
 @pytest.fixture(scope="module")

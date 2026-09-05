@@ -14,6 +14,74 @@ Append new entries directly below this line.
 
 ---
 
+## #6 — Ordering and keyset pagination
+
+`feat/keyset-pagination` · 2026-09-05 · 46 tests passing · 4 files, +277 −95
+
+### Done
+
+- Results ordered by Report ID, and by nothing else.
+- `after` seeks on Report ID rather than offsetting, so rows arriving behind a cursor
+  cannot shift a caller's place.
+- Page size defaults to 100 and is capped at 1,000, both published in OpenAPI.
+- `next_cursor` is null exactly when the collection is exhausted, because the datastore
+  is asked for one report beyond the page rather than guessing from a full-looking one.
+- The reason no sort parameter exists is on the endpoint description, so a caller
+  looking for one finds the explanation instead.
+- Query parameters gathered into a `ReportQuery` model; the endpoint signature went from
+  nine parameters to two, and FastAPI still publishes each field separately.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `tests/test_http_seam.py` | +147 −48 | Paging tests; a guarded `pages()` helper; existing filter tests now page for their whole set |
+| `src/vessel_tracking/api.py` | +104 −45 | `ReportQuery`, `PositionReportPage.of`, the `ORDERING` text, page-size bounds |
+| `tests/test_compose_smoke.py` | +19 −2 | The end-to-end count now pages, over real HTTP |
+| `src/vessel_tracking/store.py` | +7 | `after_report_id` as another filter fragment |
+
+### Verified
+
+- Full suite 46 passed, mypy strict clean, `git diff --check` clean.
+- The exactly-full final page is tested directly: 869 reports in pages of 79 divides
+  exactly, so every page including the last comes back full and the cursor still ends.
+
+### Review caught
+
+- **Avoided vocabulary in caller-facing documentation.** The ordering text said "a group
+  of equal timestamps"; CONTEXT.md puts "timestamp" on the avoid list for Reported Time.
+  The #3 entry records fixing this same drift in rejection reasons — this one was worse,
+  being published in OpenAPI rather than sitting in a comment.
+- **A trigger from #5's Take note walked past.** That entry said to revisit the endpoint
+  signature "at #6 (paging) or #10 (radius), whichever adds parameters first". This is
+  #6, it added two parameters, and the revisit did not happen until the review pointed
+  at the entry. Done now rather than deferred again.
+- The bounded page silently broke the Compose smoke test, which counted one response and
+  called it the whole collection. It pages now, which also puts the cursor through a
+  real HTTP round trip rather than only the test client.
+- `if cursor` in two page loops: a Report ID of 0 is legal and falsy, so it would have
+  restarted paging from the beginning and spun. `is not None` now.
+- `fetch_all` had dropped two `status_code == 200` assertions and looped on `while True`.
+  Both fixed by the `pages()` helper, which asserts each response and fails rather than
+  hangs if a cursor stops advancing.
+- Dead condition in the cursor derivation (`not page` could never decide the outcome).
+
+### Take note
+
+- **The empty-collection contract was untested until the review asked.** `next_cursor is
+  None` on an empty result is now asserted, but it is worth noticing that the original
+  test only checked `items == []` — the half of the contract a caller actually loops on
+  was unverified.
+- **`ReportQuery` is the third place a filter has to be named**, after `ReportFilter` and
+  its `conditions()`. Adding a filter is still two edits rather than four, which is the
+  improvement; it is not one edit, and pretending otherwise would be overselling it.
+- Glossary gaps still widening: "cursor" and "page size" join "bounding box", "time
+  interval", "poison message" and "transient failure" as vocabulary in use but absent
+  from `CONTEXT.md`. Six terms now. One `/domain-modeling` pass before #12.
+- `_as_utc` still belongs to #8 by the letter of the tickets; unchanged from #5.
+
+---
+
 ## #5 — Position Report filters: MMSI, time interval, bounding box
 
 `feat/position-report-filters` · 2026-09-05 · 40 tests passing · 6 files, +328 −40
