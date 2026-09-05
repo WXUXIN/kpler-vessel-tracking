@@ -597,3 +597,81 @@ def test_csv_is_streamed_rather_than_buffered(ingested_client: TestClient) -> No
     assert response.status_code == 200
     assert "content-length" not in response.headers
     assert len(csv_rows(response)) == MAX_PAGE_SIZE + 1
+
+
+# A circle clipping the northern Vessel's track. The nearest report outside it is 9.6
+# nautical miles from the edge, so no report sits near enough to the boundary for the
+# difference between a sphere and an ellipsoid to move it.
+CLIPPING_CIRCLE = {
+    "centre_latitude": 44.5,
+    "centre_longitude": 14.0,
+    "radius_nautical_miles": 60,
+}
+
+# A circle over the eastern Vessel's water, wide enough that the shape of the Earth
+# matters: 967 reports fall inside it on the sphere, but only 714 would if the radius
+# were compared as flat degrees. The nearest report is 8 nautical miles from the edge.
+SPHERICAL_CIRCLE = {
+    "centre_latitude": 34.5,
+    "centre_longitude": 33.5,
+    "radius_nautical_miles": 115,
+}
+
+
+def test_reports_can_be_narrowed_to_a_radius(ingested_client: TestClient) -> None:
+    items = fetch_all(ingested_client, **CLIPPING_CIRCLE)
+
+    assert len(items) == 102
+    assert {item["mmsi"] for item in items} == {NORTHERN_VESSEL}
+
+
+def test_the_radius_is_measured_on_the_sphere(ingested_client: TestClient) -> None:
+    """A circle must not be squashed by latitude.
+
+    Counted independently with a haversine distance rather than by asking the database
+    twice: 967 reports lie within 115 nautical miles of the centre. Comparing the radius
+    as flat degrees would have returned 714, so this number is what separates a circle
+    on the sphere from a rectangle wearing its name.
+    """
+    items = fetch_all(ingested_client, **SPHERICAL_CIRCLE)
+
+    assert len(items) == 967
+
+
+def test_a_partial_radius_is_rejected_rather_than_ignored(
+    client: TestClient,
+) -> None:
+    """Two thirds of a circle is not a smaller circle, it is a question with no answer."""
+    document = problem(
+        client.get("/v1/position-reports", params={"radius_nautical_miles": 60}), 422
+    )
+
+    (rejection,) = document["errors"]
+    assert "parameter" not in rejection  # no single parameter is at fault
+    assert "centre_latitude" in rejection["detail"]
+    assert "centre_longitude" in rejection["detail"]
+    assert not rejection["detail"].startswith("Value error")
+
+
+def test_the_radius_combines_with_the_other_filters(
+    ingested_client: TestClient,
+) -> None:
+    """A circle is one more filter, not a different way of asking.
+
+    Each leg has to narrow something the circle did not, or it proves nothing: the
+    circle already holds one Vessel's reports and no other's, so pairing it with that
+    same Vessel would look like a combination while removing nothing at all.
+    """
+    circle_only = fetch_all(ingested_client, **CLIPPING_CIRCLE)
+    with_box = fetch_all(ingested_client, min_latitude=44.0, **CLIPPING_CIRCLE)
+    with_interval = fetch_all(
+        ingested_client, reported_from=BOUNDARY, **CLIPPING_CIRCLE
+    )
+    with_another_vessel = fetch_all(
+        ingested_client, mmsi=EASTERN_VESSEL, **CLIPPING_CIRCLE
+    )
+
+    assert len(circle_only) == 102
+    assert len(with_box) == 58
+    assert 0 < len(with_interval) < len(circle_only)
+    assert with_another_vessel == []  # the circle holds no report of that Vessel

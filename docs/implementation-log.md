@@ -14,6 +14,78 @@ Append new entries directly below this line.
 
 ---
 
+## #10 — Radius filter
+
+`feat/keyset-pagination` · 2026-09-05 · 69 tests passing · 4 files, +179 −12
+
+### Done
+
+- `position` is a `geography(Point,4326)` column generated from latitude and longitude,
+  so the two cannot drift; a GiST index covers it.
+- Centre latitude, centre longitude and a radius in nautical miles are accepted together
+  and refused unless all three arrive.
+- `ST_DWithin` on the geography type measures across the spheroid, so a circle stays a
+  circle at any latitude.
+- Combines with MMSI, time interval and bounding box.
+- **Closes the item entry #5 handed to this ticket**: ADR-0003's geography column and
+  GiST index were described but absent from the schema. They exist now.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `tests/test_http_seam.py` | +78 | The radius, its sphere-correctness, the all-or-none rule, the combinations |
+| `src/vessel_tracking/api.py` | +59 −11 | Three parameters, the all-or-nothing validator, nautical miles to metres |
+| `src/vessel_tracking/store.py` | +27 | The `ST_DWithin` fragment and the circle invariant |
+| `db/001_schema.sql` | +15 −1 | The generated column, the GiST index, and what the planner actually does with it |
+
+### Verified
+
+- Full suite 69 passed, mypy strict clean, `git diff --check` clean.
+- The expected counts come from a haversine distance computed in Python, not from asking
+  the database twice. 967 reports lie within 115 nautical miles of the test centre; a
+  flat comparison in degrees would return 714, so the number distinguishes a circle on
+  the sphere from a rectangle wearing its name. The nearest report is 8 nautical miles
+  from the edge, far outside the ~0.6 nm that sphere and spheroid can disagree by.
+- **Measured, and it contradicted what I had written.** I first commented that this index,
+  like the composite one, would not earn its place at 2,696 rows. `EXPLAIN ANALYZE` says
+  otherwise: the GiST index is used at every radius tried - bitmap index scan for wide
+  circles, plain index scan for narrow ones - because `ST_DWithin` costs enough per row
+  that the planner reaches for it even at this volume. The comment now says that.
+
+### Review caught
+
+- **`ReportFilter` could be built as a partial circle, and both broken states failed
+  silently.** A radius with no centre becomes `ST_MakePoint(NULL, NULL)`, so the
+  predicate is NULL and every row is filtered out - an empty page with a 200. A centre
+  with no radius emits no fragment at all and is quietly ignored. That is exactly what
+  the API validator's own docstring calls worse than refusing, one layer down. The
+  dataclass now refuses it too.
+- **The combination test was largely vacuous.** The circle already holds one Vessel's
+  reports and no other's, so pairing it with that same Vessel removed nothing while
+  looking like a combination; the narrowing came entirely from the time bound. And no
+  bounding-box leg was tested at all, though the acceptance criterion names it. Each leg
+  now narrows something the circle did not.
+
+### Take note
+
+- **The circle invariant is deliberately untested.** A test would have to construct a
+  `ReportFilter` directly, and issue #1's testing decisions permit exactly one kind of
+  below-seam test - table-driven AIS decoding - and say that reaching beneath a seam is
+  otherwise not wanted. The guard exists to stop a future caller failing silently; it is
+  not reachable through the seam because the API refuses a partial circle first.
+- **Two changes to #8's error contract, made here for this ticket's rule.**
+  `InvalidParameter.parameter` is now optional, because a rule about the whole request
+  has no single parameter at fault and naming one `"query"` was a lie. And pydantic's
+  `"Value error, "` prefix is stripped from every message. Both alter the published
+  schema for every route, not just this one.
+- The column is named `position`, which `CONTEXT.md` puts on the avoid list for Position
+  Report. Kept: here it means the coordinate rather than the record, it is schema-internal
+  and never served, and issue #1's schema table names it. Flagged so the choice is on the
+  record rather than an oversight.
+
+---
+
 ## #7 — Content negotiation and CSV output
 
 `feat/keyset-pagination` · 2026-09-05 · 65 tests passing · 3 files, +364 −25

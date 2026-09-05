@@ -24,7 +24,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from vessel_tracking.domain import PositionReport
@@ -65,9 +65,13 @@ INVALID_PARAMETERS = "/problems/invalid-parameters"
 # Declared on every route that can fail, so a generated client expects the shape the
 # wire actually returns rather than the framework's default.
 class InvalidParameter(BaseModel):
-    """One rejected query parameter, named so the caller knows which to fix."""
+    """One reason the request was rejected, named where a name applies.
 
-    parameter: str
+    A parameter is absent when the rule was about the request as a whole rather than
+    any single value the caller wrote.
+    """
+
+    parameter: str | None = None
     detail: str
 
 
@@ -107,15 +111,16 @@ def _occurrence(request: Request) -> str:
     return f"{request.url.path}?{query}" if query else request.url.path
 
 
-def _parameter_name(location: Sequence[Any]) -> str:
-    """The query parameter a caller can actually act on.
+def _parameter_name(location: Sequence[Any]) -> str | None:
+    """The query parameter a caller can actually act on, where there is one.
 
-    Pydantic locates a failure as ("query", "mmsi") for a scalar and
-    ("query", "mmsi", 0) for one bad value inside a repeated parameter. The name is what
-    the caller wrote; the trailing index is a position inside their own repetition, and
-    naming a parameter "0" back to them helps nobody.
+    Pydantic locates a failure as ("query", "mmsi") for a scalar, ("query", "mmsi", 0)
+    for one bad value inside a repeated parameter, and ("query",) alone for a rule about
+    the request rather than any single value. The name is what the caller wrote; the
+    trailing index is a position inside their own repetition, and naming "0" or "query"
+    back to someone who wrote neither helps nobody.
     """
-    return str(location[1]) if len(location) > 1 else str(location[0])
+    return str(location[1]) if len(location) > 1 else None
 
 
 def _problem_response(
@@ -168,6 +173,11 @@ class PositionReportResource(BaseModel):
             longitude=report.longitude,
         )
 
+
+# The international nautical mile: 1,852 metres exactly, by definition. Callers ask in
+# nautical miles because that is what a chart is marked in; the geography type answers
+# in metres, so the conversion happens once, here at the edge.
+NAUTICAL_MILE_METRES = 1852.0
 
 CSV_MEDIA_TYPE = "text/csv"
 JSON_MEDIA_TYPE = "application/json"
@@ -231,6 +241,17 @@ class ReportQuery(BaseModel):
     max_longitude: float | None = Field(
         None, ge=-180, le=180, description="Eastern bound."
     )
+    centre_latitude: float | None = Field(
+        None, ge=-90, le=90, description="Centre of the circle to search."
+    )
+    centre_longitude: float | None = Field(
+        None, ge=-180, le=180, description="Centre of the circle to search."
+    )
+    radius_nautical_miles: float | None = Field(
+        None,
+        gt=0,
+        description="Radius of the circle, measured across the sphere.",
+    )
     after: int | None = Field(
         None,
         description="Resume after this Report ID, taken from the previous page's next_cursor.",
@@ -249,6 +270,24 @@ class ReportQuery(BaseModel):
         description=f"Page size. Defaults to {DEFAULT_PAGE_SIZE}, at most {MAX_PAGE_SIZE}.",
     )
 
+    @model_validator(mode="after")
+    def _a_circle_is_all_or_nothing(self) -> ReportQuery:
+        """Two thirds of a circle is not a smaller circle, it is an unanswerable ask.
+
+        Silently ignoring a partial circle would answer a question the caller did not
+        ask and look like it had worked, which is worse than refusing.
+        """
+        parts = {
+            "centre_latitude": self.centre_latitude,
+            "centre_longitude": self.centre_longitude,
+            "radius_nautical_miles": self.radius_nautical_miles,
+        }
+        given = {name for name, value in parts.items() if value is not None}
+        if given and len(given) < len(parts):
+            missing = ", ".join(sorted(set(parts) - given))
+            raise ValueError(f"a circle needs all three parts; missing {missing}")
+        return self
+
     def filters(self) -> ReportFilter:
         """The same request as the datastore sees it."""
         return ReportFilter(
@@ -260,6 +299,13 @@ class ReportQuery(BaseModel):
             max_latitude=self.max_latitude,
             min_longitude=self.min_longitude,
             max_longitude=self.max_longitude,
+            centre_latitude=self.centre_latitude,
+            centre_longitude=self.centre_longitude,
+            radius_metres=(
+                None
+                if self.radius_nautical_miles is None
+                else self.radius_nautical_miles * NAUTICAL_MILE_METRES
+            ),
         )
 
 
@@ -406,7 +452,9 @@ def create_app(store: PositionReportStore | None = None) -> FastAPI:
                 errors=[
                     InvalidParameter(
                         parameter=_parameter_name(error["loc"]),
-                        detail=str(error["msg"]),
+                        # Pydantic prefixes a custom rule's message with "Value error,";
+                        # the caller wrote the request, not the validator.
+                        detail=str(error["msg"]).removeprefix("Value error, "),
                     )
                     for error in failure.errors()
                 ],

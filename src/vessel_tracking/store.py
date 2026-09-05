@@ -54,6 +54,21 @@ class ReportFilter:
     max_latitude: float | None = None
     min_longitude: float | None = None
     max_longitude: float | None = None
+    centre_latitude: float | None = None
+    centre_longitude: float | None = None
+    radius_metres: float | None = None
+
+    def __post_init__(self) -> None:
+        """A circle is all three of its parts or none of them.
+
+        The API refuses a partial circle before it gets here, but a filter built any
+        other way would fail quietly rather than loudly: a radius without a centre
+        compares against NULL and matches nothing, and a centre without a radius is
+        dropped. Both look exactly like a query that worked.
+        """
+        circle = (self.centre_latitude, self.centre_longitude, self.radius_metres)
+        if any(part is not None for part in circle) and None in circle:
+            raise ValueError("a circle needs a centre and a radius, or neither")
 
     def conditions(self) -> tuple[list[str], list[Any]]:
         """SQL fragments and the parameters that fill them, in step.
@@ -93,6 +108,18 @@ class ReportFilter:
             if bound is not None:
                 fragments.append(f"{column} {comparison} %s")
                 params.append(bound)
+        # On the geography type ST_DWithin measures across the spheroid, so a circle
+        # stays a circle at any latitude, and it can use the GiST index rather than
+        # computing a distance for every row. ST_MakePoint takes x then y: longitude
+        # before latitude, which is the opposite of how they are said aloud.
+        if self.radius_metres is not None:
+            fragments.append(
+                "ST_DWithin(position,"
+                " ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)"
+            )
+            params.extend(
+                [self.centre_longitude, self.centre_latitude, self.radius_metres]
+            )
         return fragments, params
 
 
