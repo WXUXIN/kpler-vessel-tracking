@@ -27,7 +27,21 @@ This choice does not scale to production AIS ingest, which runs to billions of p
 The migration path is a Timescale hypertable or ClickHouse, and the crossover arrives when
 the working set stops fitting in memory — around the low hundreds of millions of reports.
 
-Indexes are designed for the query shape at scale, not for the supplied dataset. With three
-vessels, MMSI selectivity is roughly one third, so the planner will correctly sequentially
-scan 2,696 rows and use none of them. Monthly `RANGE` partitioning on Reported Time is the
-intended scheme at volume, and is deliberately not applied here.
+Indexes are designed for the query shape at scale, not for the supplied dataset. Monthly
+`RANGE` partitioning on Reported Time is the intended scheme at volume, and is deliberately
+not applied here.
+
+An earlier revision of this section went further and said the planner would "correctly
+sequentially scan 2,696 rows and use none of them". `EXPLAIN ANALYZE` over the real dataset
+disproves that for two of the three query shapes it was measured against:
+
+- **MMSI alone**: a sequential scan, as predicted. One vessel is 36% of the table, so a
+  scan is genuinely cheaper.
+- **MMSI and a time window**: a bitmap index scan on `(mmsi, reported_at)`.
+- **A radius**: a bitmap index scan on the GiST index for wide circles, and a plain index
+  scan for narrow ones.
+
+The deciding factor is cost per row rather than row count. A btree equality test on a
+three-valued column saves the planner nothing, while `ST_DWithin` on a geography is
+expensive enough per row that the index pays for itself even over 2,696 of them. The claim
+was written at the same time as the decision, before anything had been measured.
