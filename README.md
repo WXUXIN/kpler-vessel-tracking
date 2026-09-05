@@ -12,6 +12,8 @@ where the vessel truly was. That distinction drives most of what follows.
   art — Position Report, Report ID, Reported Time, Conflicting Reports — it is defined
   there and used as defined.
 - **[docs/adr/](docs/adr/)** — the seven architecture decision records.
+- **[docs/api.md](docs/api.md)** — the endpoint reference: every parameter, the response
+  shape, content negotiation and every error.
 - **[docs/implementation-log.md](docs/implementation-log.md)** — what each ticket
   shipped, what the reviews caught, and what was deferred on purpose.
 - **[docs/dataset-observations.md](docs/dataset-observations.md)** — the full dataset
@@ -88,7 +90,8 @@ pytest                    # adds the end-to-end run against a real broker
 ## The API
 
 One collection endpoint, `GET /v1/position-reports`. Every filter is optional and they
-compose, so a specific question is a single request. OpenAPI is at `/openapi.json`.
+compose, so a specific question is a single request. Full reference in
+[docs/api.md](docs/api.md); OpenAPI at `/openapi.json`.
 
 | | |
 | --- | --- |
