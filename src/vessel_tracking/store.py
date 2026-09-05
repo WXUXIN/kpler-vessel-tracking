@@ -9,10 +9,31 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+import psycopg
 from psycopg.rows import class_row
 from psycopg_pool import ConnectionPool
 
 from vessel_tracking.domain import PositionReport
+
+
+class TransientFailure(Exception):
+    """A datastore failure that a later attempt may well survive.
+
+    The other half of ADR-0004's taxonomy, and the counterpart of the domain's
+    InvalidReport: this one is retried with backoff and never dead-lettered, because
+    discarding valid Position Reports over an outage that has nothing to do with them
+    is precisely the failure the taxonomy exists to prevent.
+    """
+
+
+class UnstorableReport(Exception):
+    """A write the datastore refuses however often it is retried.
+
+    Poison at the row level rather than the message level: the report passed validation
+    but the datastore will not have it - a value outside a column's range, say.
+    Validation cannot anticipate every such case, so this lands on the dead-letter side
+    of ADR-0004's taxonomy rather than the retry side.
+    """
 
 _COLUMNS = """
     report_id, mmsi, reported_at, nav_status, speed_knots,
@@ -36,7 +57,13 @@ class PositionReportStore:
         self._pool.close()
 
     def insert_many(self, reports: Sequence[PositionReport]) -> int:
-        """Write a batch in one transaction. Returns the number of rows actually added."""
+        """Write a batch in one transaction. Returns the number of rows actually added.
+
+        Raises TransientFailure when the datastore is unreachable, so that the caller
+        can tell an outage apart from a message that can never be stored. Only the
+        write path classifies: the read paths belong to the API, whose error contract
+        is a separate concern.
+        """
         if not reports:
             return 0
         rows: list[tuple[Any, ...]] = [
@@ -54,9 +81,15 @@ class PositionReportStore:
             )
             for report in reports
         ]
-        with self._pool.connection() as conn, conn.cursor() as cur:
-            cur.executemany(_INSERT, rows)
-            return cur.rowcount
+        try:
+            with self._pool.connection() as conn, conn.cursor() as cur:
+                cur.executemany(_INSERT, rows)
+                return cur.rowcount
+        except psycopg.OperationalError as failure:
+            # PoolTimeout is one of these: the datastore is out of reach either way.
+            raise TransientFailure(str(failure)) from failure
+        except psycopg.Error as failure:
+            raise UnstorableReport(str(failure)) from failure
 
     def count(self) -> int:
         with self._pool.connection() as conn, conn.cursor() as cur:

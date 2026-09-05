@@ -7,8 +7,11 @@ Both paths share this code, so the seam tests cover what the consumer actually r
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+import json
+import logging
+import time
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
 from vessel_tracking.domain import (
@@ -17,9 +20,46 @@ from vessel_tracking.domain import (
     RejectedReport,
     from_message,
 )
-from vessel_tracking.store import PositionReportStore
+from vessel_tracking.store import (
+    PositionReportStore,
+    TransientFailure,
+    UnstorableReport,
+)
+
+log = logging.getLogger("vessel_tracking.ingest")
 
 DEFAULT_BATCH_SIZE = 500
+RETRY_INITIAL_SECONDS = 0.5
+RETRY_MAXIMUM_SECONDS = 30.0
+RETRY_MULTIPLIER = 2.0
+
+
+@dataclass(frozen=True, slots=True)
+class Backoff:
+    """How long to wait between attempts at a write that failed transiently.
+
+    Doubling, capped, and never exhausted: ADR-0004 requires the consumer to wait out
+    a datastore that is not there rather than discard reports it could have written.
+    Sleeping is injected so that tests can watch the schedule without living through it.
+    """
+
+    initial_seconds: float = RETRY_INITIAL_SECONDS
+    maximum_seconds: float = RETRY_MAXIMUM_SECONDS
+    sleep: Callable[[float], None] = time.sleep
+
+    def wait(self, attempt: int) -> float:
+        """Wait before the given attempt, counting from one. Returns the delay waited."""
+        delay = min(
+            self.initial_seconds * RETRY_MULTIPLIER ** (attempt - 1),
+            self.maximum_seconds,
+        )
+        self.sleep(delay)
+        return delay
+
+
+def _never() -> bool:
+    """The default stop signal: a writer nobody is shutting down waits indefinitely."""
+    return False
 
 
 class DeadLetters(Protocol):
@@ -50,10 +90,14 @@ class BatchWriter:
         store: PositionReportStore,
         dead_letters: DeadLetters,
         batch_size: int = DEFAULT_BATCH_SIZE,
+        backoff: Backoff = Backoff(),
+        stopping: Callable[[], bool] = _never,
     ) -> None:
         self._store = store
         self._dead_letters = dead_letters
         self._batch_size = batch_size
+        self._backoff = backoff
+        self._stopping = stopping
         self._batch: list[PositionReport] = []
         self._written = 0
         self._rejected = 0
@@ -93,10 +137,63 @@ class BatchWriter:
         """Write the pending batch in one transaction. Returns rows added by this call."""
         if not self._batch:
             return 0
-        added = self._store.insert_many(self._batch)
+        added = self._write(self._batch)
         self._batch = []
         self._written += added
         return added
+
+    def _write(self, batch: list[PositionReport]) -> int:
+        """Write the batch, waiting out a datastore that is not there.
+
+        A transient failure is retried indefinitely and never dead-lettered: it is not
+        the batch's fault, and no number of retries makes the data worse. Blocking here
+        stalls the whole consumer, which is the intended behaviour rather than an
+        oversight - availability is not traded for data loss (ADR-0004). The exception
+        is shutdown, where the batch is left unwritten: its offsets never moved, so the
+        records are still on the topic for the next run to collect.
+        """
+        attempt = 0
+        while True:
+            try:
+                return self._store.insert_many(batch)
+            except UnstorableReport:
+                if len(batch) == 1:
+                    raise
+                return self._write_separately(batch)
+            except TransientFailure as failure:
+                if self._stopping():
+                    raise
+                attempt += 1
+                delay = self._backoff.wait(attempt)
+                log.warning(
+                    json.dumps(
+                        {
+                            "event": "write_retry",
+                            "attempt": attempt,
+                            "waited_seconds": delay,
+                            "pending": len(batch),
+                            "detail": str(failure),
+                        }
+                    )
+                )
+
+    def _write_separately(self, batch: list[PositionReport]) -> int:
+        """Write a refused batch report by report, setting aside only what is refused.
+
+        One row the datastore will not have must not cost the other 499 their place,
+        and it must not be retried forever either. The batch is written in a single
+        transaction, so a refusal rolls the whole thing back and everything good in it
+        is written again here.
+        """
+        written = 0
+        for report in batch:
+            try:
+                written += self._write([report])
+            except UnstorableReport as unstorable:
+                # The raw message is long gone - it was decoded to get this far - so
+                # what reaches the topic is the decoded report and the refusal.
+                self.reject(asdict(report), f"the datastore refused it: {unstorable}")
+        return written
 
 
 def ingest_messages(

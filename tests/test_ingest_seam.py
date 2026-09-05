@@ -5,17 +5,17 @@ consumer's batch processor. Everything asserted here is externally observable:
 rows in the datastore, and the counters the pipeline reports.
 """
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
-from itertools import chain
+from itertools import chain, islice
 from typing import Any, Callable
 
 import pytest
 from conftest import RecordingDeadLetters
-from vessel_tracking.domain import malformed_messages
-from vessel_tracking.ingest import ingest_messages
-from vessel_tracking.store import PositionReportStore
+from vessel_tracking.domain import PositionReport, malformed_messages
+from vessel_tracking.ingest import Backoff, BatchWriter, ingest_messages
+from vessel_tracking.store import PositionReportStore, TransientFailure
 
 Stream = Callable[..., Iterator[Mapping[str, Any]]]
 
@@ -159,3 +159,120 @@ def test_the_supplied_feed_alone_is_rejected_nowhere(
 
     assert (result.written, result.rejected) == (FEED_SIZE, 0)
     assert dead_letters.sent == []
+
+
+def test_a_batch_lost_to_a_crash_comes_back_on_replay(
+    store: PositionReportStore,
+    dead_letters: RecordingDeadLetters,
+    published_stream: Stream,
+) -> None:
+    """Nothing is lost when the consumer dies with a batch still in hand.
+
+    Redelivery resumes at the last committed offset, not at the last written row. The
+    writer dies holding 100 records that no committed batch covered, so redelivery
+    restarts at 500 and those 100 come back with it.
+    """
+    crashed = BatchWriter(store, dead_letters, batch_size=250)
+    for message in islice(published_stream(), 600):
+        crashed.add(message)
+    assert store.count() == 500  # two batches written; 100 died in hand
+
+    redelivered = islice(published_stream(), 500, None)
+    result = ingest_messages(redelivered, store, dead_letters)
+
+    assert result.written == FEED_SIZE - 500
+    assert store.count() == FEED_SIZE
+
+
+def test_a_batch_written_before_a_crash_is_not_written_twice(
+    store: PositionReportStore,
+    dead_letters: RecordingDeadLetters,
+    published_stream: Stream,
+) -> None:
+    """Nothing is duplicated when the crash falls between the write and the commit.
+
+    That window is the normal case, not the exceptional one: offsets move only after
+    the datastore transaction, so the replayed messages are ones already stored, and
+    the Report ID primary key discards them (ADR-0004).
+    """
+    crashed = BatchWriter(store, dead_letters, batch_size=250)
+    for message in islice(published_stream(), 500):
+        crashed.add(message)
+
+    result = ingest_messages(published_stream(), store, dead_letters)
+
+    assert result.written == FEED_SIZE - 500
+    assert store.count() == FEED_SIZE
+
+
+class FlakyStore(PositionReportStore):
+    """A real store whose first few writes fail the way an outage does.
+
+    Real PostgreSQL underneath, so the rows asserted on are real rows; only the
+    failure is injected.
+    """
+
+    def __init__(self, dsn: str, failures: int) -> None:
+        super().__init__(dsn)
+        self._remaining = failures
+
+    def insert_many(self, reports: Sequence[PositionReport]) -> int:
+        if self._remaining:
+            self._remaining -= 1
+            raise TransientFailure("connection reset by peer")
+        return super().insert_many(reports)
+
+
+def test_a_transient_failure_is_waited_out_rather_than_dead_lettered(
+    dsn: str,
+    store: PositionReportStore,
+    dead_letters: RecordingDeadLetters,
+    published_stream: Stream,
+) -> None:
+    """The consumer stalls rather than skipping data it could have written (ADR-0004).
+
+    Dead-lettering an outage would discard valid Position Reports over a fault that
+    has nothing to do with them, so a transient failure is retried indefinitely and
+    reaches the dead-letter topic never.
+    """
+    slept: list[float] = []
+    flaky = FlakyStore(dsn, failures=3)
+    try:
+        writer = BatchWriter(
+            flaky,
+            dead_letters,
+            batch_size=FEED_SIZE,
+            backoff=Backoff(initial_seconds=0.5, sleep=slept.append),
+        )
+        for message in published_stream():
+            writer.add(message)
+        writer.flush()
+    finally:
+        flaky.close()
+
+    assert writer.written == FEED_SIZE
+    assert store.count() == FEED_SIZE
+    assert dead_letters.sent == []
+    assert slept == [0.5, 1.0, 2.0]
+
+
+def test_a_report_the_datastore_refuses_does_not_take_its_batch_down(
+    store: PositionReportStore,
+    dead_letters: RecordingDeadLetters,
+    published_stream: Stream,
+) -> None:
+    """A row the datastore will not have is poison too, isolated rather than retried.
+
+    Speed 99999 is a non-negative wire value, so validation passes it, but it decodes
+    to 9999.9 knots and overflows the column. Validation cannot anticipate every such
+    case, so the write falls back to report by report and sets aside only the refused
+    one - retrying it forever would wedge ingest, which is what ADR-0004 forbids.
+    """
+    refused = {**next(published_stream()), "stationId": 999999, "speed": 99999}
+
+    result = ingest_messages(chain(published_stream(), [refused]), store, dead_letters)
+
+    assert result.written == FEED_SIZE
+    assert result.rejected == 1
+    assert store.count() == FEED_SIZE
+    assert "refused" in dead_letters.sent[0].reason

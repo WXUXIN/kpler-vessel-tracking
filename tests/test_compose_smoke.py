@@ -74,3 +74,20 @@ def test_the_feed_travels_end_to_end(pipeline: None) -> None:
 
     assert _stored_report_count() == FEED_SIZE
     assert served == FEED_SIZE
+
+
+def test_a_consumer_given_an_idle_timeout_stops_on_its_own(pipeline: None) -> None:
+    """A demonstration run terminates by itself rather than needing to be killed.
+
+    The feed has already been consumed by the time this runs, so the consumer finds
+    nothing, waits out its idle period and reports why it stopped. A non-zero exit
+    fails here, because _compose checks it.
+    """
+    run = _compose(
+        "run", "--rm",
+        "-e", "VT_IDLE_TIMEOUT_SECONDS=5",
+        "consumer", "vt-consumer",
+        timeout=180,
+    )
+
+    assert '"stopped_by": "idle"' in run.stdout + run.stderr
