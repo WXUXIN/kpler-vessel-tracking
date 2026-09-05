@@ -69,10 +69,17 @@ simple browser page, built from the existing API as-is, that puts them on a map.
 
 ### Take note
 
-- **CARTO's dark basemap tiles now require an API key.** The plan called for them;
-  the first screenshot showed "API KEY REQUIRED" watermarked across the map. Swapped
-  to standard OpenStreetMap tiles, which stay free with no key — a plan detail that
-  didn't survive contact with the actual service.
+- **Two basemap providers turned out not to work before a third did.** The plan
+  called for CARTO's dark tiles; the first screenshot showed them watermarked
+  "API KEY REQUIRED". Standard OpenStreetMap tiles worked in that session, but
+  started returning their "Access denied" placeholder tile once this session's own
+  repeated automated screenshotting looked like the bulk/scripted use their
+  [tile usage policy](https://operations.osmfoundation.org/policies/tiles/)
+  prohibits — reported by the user as "a huge black chunk" where the map should be,
+  which was `#map`'s dark CSS background showing through failed tile loads. Settled
+  on Esri's ArcGIS Online `World_Dark_Gray_Base` — no key, no policy issue at this
+  volume, and closer to the original dark control-room look than the OSM fallback
+  was anyway.
 - **Rate-limit headers only exist on the 429 response**, not on a 200 — confirmed by
   reading `src/vessel_tracking/api.py` (`_problem_response` sets them; the success
   path never does). The telemetry strip reads them opportunistically and says "not

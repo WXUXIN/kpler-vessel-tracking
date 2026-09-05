@@ -444,10 +444,18 @@ function wireControls() {
 
 function init() {
   map = L.map("map", { preferCanvas: true }).setView([38.9, 23.2], 5);
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    attribution: "&copy; OpenStreetMap contributors",
-    maxZoom: 19,
-  }).addTo(map);
+  // Standard OSM tiles worked in development but started returning their "Access
+  // denied" placeholder under repeated automated testing (see
+  // https://operations.osmfoundation.org/policies/tiles/ — bulk/scripted use isn't
+  // what the free tile server is for). Esri's ArcGIS Online basemap has no such
+  // policy for this volume and needs no API key, unlike CARTO's basemaps.
+  L.tileLayer(
+    "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+    {
+      attribution: "&copy; Esri &mdash; Esri, DeLorme, NAVTEQ",
+      maxZoom: 16,
+    },
+  ).addTo(map);
 
   buildVesselList();
   buildTrackVesselSelect();
