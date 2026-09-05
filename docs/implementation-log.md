@@ -14,6 +14,155 @@ Append new entries directly below this line.
 
 ---
 
+## Postgres published on 5433, not 5432
+
+`feat/demo-frontend` · 2026-09-06 · not a ticket, asked for directly
+
+Asked for directly: Postgres reachable on the host at 5432. It already was, on paper —
+`docker-compose.yml` has said `5432:5432` since the tracer bullet. It wasn't reachable in
+practice, because this machine runs a native Homebrew PostgreSQL 17 bound to
+`127.0.0.1:5432`/`::1:5432`, which macOS resolves ahead of Docker's `0.0.0.0:5432` for
+anything connecting via `localhost`. `docker port` reported the container bound and
+healthy the whole time; `psql -h localhost -p 5432` was silently reaching the *other*
+Postgres instead (confirmed: it answered `role "vessel" does not exist`, which belongs to
+neither database).
+
+Given the choice between stopping the native service, reconfiguring it, or moving this
+project's container instead, the container moved: lowest blast radius, and every other
+project relying on the native install keeps working untouched.
+
+### Done
+
+- `docker-compose.yml`: Postgres published on `5433:5432`. The internal Docker-network
+  address (`postgres:5432`, used by every container-to-container connection) is
+  unchanged — only the host-side publish moved.
+- `settings.py`'s `database_url` default (used only when `VT_DATABASE_URL` is unset,
+  i.e. running a component directly on the host rather than via Compose) updated to
+  `localhost:5433` to match, so it can't silently resolve to the native Postgres instead.
+- `.github/workflows/tests.yml` deliberately **not** changed: CI runs on an isolated
+  GitHub-hosted runner with no native Postgres to conflict with, so it has no reason to
+  move off 5432.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `docker-compose.yml` | 1 line | Publish Postgres on host port 5433 instead of 5432 |
+| `src/vessel_tracking/settings.py` | 1 line | Host-side fallback DSN updated to match |
+
+### Verified
+
+- `psql "postgresql://vessel:vessel@localhost:5433/vessel_tracking"` reaches the
+  container (confirmed against the `vessel` role and schema); `localhost:5432` still
+  reaches the native install, as expected, and is no longer this project's concern.
+- Full `pytest` suite (76 tests) passes locally against the moved port.
+
+### Take note
+
+- **This is a per-machine port conflict, not a project decision.** On a machine without
+  a native Postgres already on 5432, the compose file would work unmodified at 5432. If
+  that ever changes here (the native install is stopped or moved), the value in
+  `docker-compose.yml` is the only thing to revert.
+- **First attempt at this also changed `.github/workflows/tests.yml`'s service-container
+  port to 5433, but left its `VT_TEST_DATABASE_URL` env var pointing at 5432** — CI failed
+  with `connection refused` on every seam test as a result (61 errors). The local suite
+  didn't catch this because it uses Testcontainers, which starts its own ephemeral
+  container on a random port regardless of anything in this repo's compose file — a
+  different code path from what CI actually exercises. Reverted the CI file to its
+  original, untouched state rather than fixing the mismatched env var, since CI never
+  needed the change in the first place.
+
+## Demo front-end at `/ui`
+
+`feat/demo-frontend` · 2026-09-05 · not a ticket, asked for directly
+
+The API's capabilities — radius search, keyset pagination, content negotiation, RFC
+9457 errors, a fail-open rate limiter — were provable only via `curl`. Asked for: a
+simple browser page, built from the existing API as-is, that puts them on a map.
+
+### Done
+
+- `static/index.html` + `app.js` + `styles.css`: vanilla JS, no build step, no
+  framework. Leaflet (CDN, pinned version) on standard OpenStreetMap tiles.
+- Mounted same-origin at `/ui` (`StaticFiles` in `create_app()`) instead of adding
+  CORS — a plain `fetch()` from the same origin needs neither.
+- Filter sidebar mirrors `ReportQuery` field-for-field: vessel checkboxes (all three
+  known MMSIs), time range with two presets, radius search (click the map, drag a
+  slider, live circle overlay), bounding box, page size.
+- "Load next page" is wired to `after`/`next_cursor`, not a page-number scheme — the
+  one control that specifically exercises keyset pagination.
+- "Download CSV" issues the same query with `Accept: text/csv`, a real browser
+  download.
+- A telemetry strip shows status, client-measured duration, and the response's
+  `ratelimit-*` headers — which only appear on a 429, not on success (see Take note).
+- "Track coherence" panel: fetch one vessel's full history, redraw its path ordered
+  by Report ID vs. by Reported Time, to make the finding in
+  [Dataset observations](../README.md#dataset-observations) something to look at
+  rather than take on faith.
+- "Send an invalid query" and "Simulate the rate limit" trigger real 422/429s and
+  render the RFC 9457 problem document that comes back.
+- `Traffic`'s `UNLIMITED_PATHS` exact-match check couldn't exempt a directory of
+  static assets, so it grew a prefix check (`_is_unlimited`) covering `/ui` — loading
+  the demo page itself doesn't spend the 10-req/min budget the demo exists to show.
+
+### Files changed
+
+| File | Lines | What changed and why |
+| --- | --- | --- |
+| `static/index.html` | +143 | The page structure |
+| `static/app.js` | +458 | All interaction: fetch calls, map rendering, telemetry |
+| `static/styles.css` | +326 | Dark, map-friendly layout |
+| `src/vessel_tracking/api.py` | +14 −2 | `StaticFiles` mount at `/ui`; `_is_unlimited` prefix check replacing the exact-match `UNLIMITED_PATHS` lookup |
+| `Dockerfile` | +1 | `COPY static ./static`, alongside the existing `ship_positions.json` copy |
+| `README.md` | +16 | "Demo front-end" section, linked from "Running it" and "The API" |
+
+### Verified
+
+- Full flow driven against the real Compose stack with a headless, scripted browser
+  (not just `curl`): page load, every filter, radius click-and-drag, bounding box,
+  "Load next page", CSV download (a real file landed on disk with the expected rows),
+  the invalid-query and rate-limit demos, and the track-coherence toggle — each
+  checked against the actual DOM state and, for the map, a rendered screenshot.
+- `mypy src/` clean; full `pytest` suite (76 tests) still passes unchanged.
+
+### Take note
+
+- **Two basemap providers turned out not to work before a third did.** The plan
+  called for CARTO's dark tiles; the first screenshot showed them watermarked
+  "API KEY REQUIRED". Standard OpenStreetMap tiles worked in that session, but
+  started returning their "Access denied" placeholder tile once this session's own
+  repeated automated screenshotting looked like the bulk/scripted use their
+  [tile usage policy](https://operations.osmfoundation.org/policies/tiles/)
+  prohibits — reported by the user as "a huge black chunk" where the map should be,
+  which was `#map`'s dark CSS background showing through failed tile loads. Settled
+  on Esri's ArcGIS Online `World_Dark_Gray_Base` — no key, no policy issue at this
+  volume, and closer to the original dark control-room look than the OSM fallback
+  was anyway.
+- **Rate-limit headers only exist on the 429 response**, not on a 200 — confirmed by
+  reading `src/vessel_tracking/api.py` (`_problem_response` sets them; the success
+  path never does). The telemetry strip reads them opportunistically and says "not
+  hit yet" until the first refusal, rather than implying a live countdown the API
+  doesn't expose.
+- **The Track coherence panel's default vessel mattered more than expected.** It
+  defaulted to `247039300` for its own anomaly (looks like two vessels sharing one
+  MMSI), but that vessel is noisy in *both* orderings — 45 km/79 km median hop,
+  confirmed by computing it directly from the running API's own response. Vessel
+  `311486000` is the one the README's "0.5 km vs. 7 km" finding is actually about,
+  and only it renders as the intended clean-line-vs.-scribble contrast. Caught by
+  screenshotting both toggle states and noticing they looked identical, not by
+  reasoning about it in advance — worth remembering that a documented aggregate
+  number can be true of the dataset as a whole while being the wrong example for a
+  demo of one specific vessel.
+- **Search results were briefly invisible on the map** — a filtered query for a
+  single vessel returned points already covered by that vessel's own overview track,
+  in the same color. Fixed by dimming the overview once a real search or track load
+  runs, and outlining result markers in a dark stroke so they read as distinct dots
+  regardless of what's underneath. Also caught by screenshot, not by reading the
+  code.
+- `.github/workflows/tests.yml` and `docker-compose.yml` carry an uncommitted
+  `5432→5433` port remap from before this session — not touched, not part of this
+  commit; flagging so it isn't mistaken for something this change introduced.
+
 ## Endpoint reference in `docs/api.md`
 
 `feat/documentation` · 2026-09-05 · docs only

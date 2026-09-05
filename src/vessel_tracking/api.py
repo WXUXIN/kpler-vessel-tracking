@@ -28,6 +28,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 import anyio
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -158,6 +159,15 @@ class RequestLog:
 # counted: the log is a record of traffic, and this is traffic.
 UNLIMITED_PATHS = frozenset({"/healthz"})
 
+# The demo page under /ui and its assets are the same kind of exemption, extended to a
+# prefix because it is a directory rather than one path. Only the data-plane calls the
+# page itself makes to /v1/position-reports are meant to feel the limit.
+UNLIMITED_PREFIX = "/ui/"
+
+
+def _is_unlimited(path: str) -> bool:
+    return path in UNLIMITED_PATHS or path == "/ui" or path.startswith(UNLIMITED_PREFIX)
+
 
 class Traffic:
     """Rate limits, times and records every request.
@@ -180,7 +190,7 @@ class Traffic:
         answer to every caller in order to give a better one to none. It is logged at
         error, because for as long as it lasts the limit is not being applied.
         """
-        if scope["path"] in UNLIMITED_PATHS:
+        if _is_unlimited(scope["path"]):
             return None
         try:
             return await self._limits.check(client)
@@ -616,6 +626,9 @@ def create_app(
     )
 
     app.add_middleware(Traffic, limits=limiter, requests=requests)
+
+    # A demo of the endpoints above, not an endpoint itself. See UNLIMITED_PREFIX.
+    app.mount("/ui", StaticFiles(directory="static", html=True), name="ui")
 
     @app.exception_handler(RequestValidationError)
     async def invalid_parameters(

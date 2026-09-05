@@ -12,7 +12,7 @@ class Settings(BaseSettings):
         env_prefix="VT_", env_file=".env", extra="ignore"
     )
 
-    database_url: str = "postgresql://vessel:vessel@localhost:5432/vessel_tracking"
+    database_url: str = "postgresql://vessel:vessel@localhost:5433/vessel_tracking"
     kafka_bootstrap_servers: str = "localhost:9092"
     kafka_topic: str = "ais.position-reports"
     kafka_dead_letter_topic: str = "ais.position-reports.dead-letter"
