@@ -120,6 +120,7 @@ class BatchWriter:
         self._rejected += 1
 
     def add(self, message: Mapping[str, Any]) -> int:
+        """Decode and accumulate one record. Returns whether a batch reached the store."""
         try:
             report = from_message(message)
         except InvalidReport as invalid:

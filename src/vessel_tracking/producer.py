@@ -101,14 +101,14 @@ def main() -> None:
         producer.produce(
             settings.kafka_topic,
             key=partition_key(message),
-            value=encode(message),
+            value=encode(message), # message here would be the raw feed message or an injected malformed message
         )
-        producer.poll(0)
+        producer.poll(0) # poll will trigger delivery callbacks for any messages that have been sent to the broker
         published += 1
         if interval:
             time.sleep(interval)
 
-    producer.flush()
+    producer.flush() # deliver messages before exit. Without it, the process would exit and the leftovers in the box would evaporate.
     # Feed records and injected junk are counted apart, so a run that demonstrates the
     # rejection path still states plainly how much of the feed it published.
     log.info(

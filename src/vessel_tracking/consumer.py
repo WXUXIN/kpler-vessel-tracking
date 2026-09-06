@@ -185,7 +185,7 @@ def main() -> None:
                 f"payload is not JSON: {undecodable}",
             )
             return False
-        return bool(writer.add(body))
+        return bool(writer.add(body)) # for each message, add to the batch and return True if the batch was flushed to the store
 
     try:
         while _running:

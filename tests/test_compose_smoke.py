@@ -23,6 +23,11 @@ INGEST_TIMEOUT_SECONDS = 180
 pytestmark = pytest.mark.compose
 
 
+# --------------------------------------------------------------------------------------
+# Compose helpers
+# --------------------------------------------------------------------------------------
+
+
 def _compose(*args: str, timeout: int = 600) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["docker", "compose", *args],
@@ -62,6 +67,11 @@ def _served_report_count() -> int:
             return total
 
 
+# --------------------------------------------------------------------------------------
+# The pipeline fixture
+# --------------------------------------------------------------------------------------
+
+
 @pytest.fixture(scope="module")
 def pipeline() -> Iterator[None]:
     _compose("down", "-v")
@@ -71,6 +81,11 @@ def pipeline() -> Iterator[None]:
     _compose("build", "producer")
     yield
     _compose("down", "-v")
+
+
+# --------------------------------------------------------------------------------------
+# End-to-end scenarios
+# --------------------------------------------------------------------------------------
 
 
 def test_the_feed_travels_end_to_end(pipeline: None) -> None:

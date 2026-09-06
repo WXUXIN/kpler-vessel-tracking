@@ -18,6 +18,8 @@ where the vessel truly was. That distinction drives most of what follows.
   shipped, what the reviews caught, and what was deferred on purpose.
 - **[docs/dataset-observations.md](docs/dataset-observations.md)** — the full dataset
   analysis, regenerable from the feed.
+- **[docs/test-catalog.md](docs/test-catalog.md)** — every test in the suite, grouped by
+  file and by what it proves.
 
 ---
 

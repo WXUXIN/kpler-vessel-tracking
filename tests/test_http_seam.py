@@ -58,6 +58,11 @@ def fetch_all(client: TestClient, **params: Any) -> list[dict[str, Any]]:
     ]
 
 
+# --------------------------------------------------------------------------------------
+# Basic retrieval and ordering
+# --------------------------------------------------------------------------------------
+
+
 def test_the_collection_is_empty_before_anything_is_ingested(
     client: TestClient,
 ) -> None:
@@ -93,6 +98,11 @@ def test_position_reports_are_served_in_report_id_order(
     assert ids == sorted(ids)
 
 
+# --------------------------------------------------------------------------------------
+# Filtering by vessel (MMSI)
+# --------------------------------------------------------------------------------------
+
+
 # The feed's three Vessels and how many Position Reports each carries. Named by where
 # they sail, because that is all the data supports: the system holds no Vessel
 # attributes beyond the MMSI, so any ship's name here would be invented.
@@ -119,6 +129,11 @@ def test_several_vessels_can_be_asked_about_at_once(
     assert {item["mmsi"] for item in items} == {NORTHERN_VESSEL, EASTERN_VESSEL}
 
 
+# --------------------------------------------------------------------------------------
+# Filtering by time interval
+# --------------------------------------------------------------------------------------
+
+
 # One instant in the feed, carrying 119 Position Reports, with 601 strictly before it.
 BOUNDARY = "2013-07-01T17:34:00Z"
 BEFORE_BOUNDARY = 601
@@ -139,6 +154,11 @@ def test_the_time_interval_is_half_open(ingested_client: TestClient) -> None:
     assert len(ending) == BEFORE_BOUNDARY
     assert len(starting) + len(ending) == FEED_SIZE
     assert not {i["report_id"] for i in starting} & {i["report_id"] for i in ending}
+
+
+# --------------------------------------------------------------------------------------
+# Filtering by bounding box
+# --------------------------------------------------------------------------------------
 
 
 # A box that clips the northern Vessel's track rather than enclosing it, so the bounds
@@ -188,6 +208,11 @@ def test_each_bound_of_the_box_narrows_in_its_own_direction(
 WINDOW_END = "2013-07-01T17:40:00Z"
 
 
+# --------------------------------------------------------------------------------------
+# Combining filters
+# --------------------------------------------------------------------------------------
+
+
 def test_both_bounds_together_make_a_closed_window(
     ingested_client: TestClient,
 ) -> None:
@@ -235,6 +260,11 @@ def test_a_bound_without_a_timezone_is_read_as_utc(
     naive = fetch_all(ingested_client, reported_from="2013-07-01T17:34:00")
 
     assert len(naive) == FROM_BOUNDARY
+
+
+# --------------------------------------------------------------------------------------
+# Pagination (keyset)
+# --------------------------------------------------------------------------------------
 
 
 def test_a_page_is_bounded_even_when_nothing_is_asked_for(
@@ -327,6 +357,11 @@ def test_a_last_page_that_is_exactly_full_still_ends_the_paging(
 
     assert sizes == [79] * 11  # 869 = 11 x 79, so every page is full, including the last
     assert sum(sizes) == REPORTS_PER_VESSEL[NORTHERN_VESSEL]
+
+
+# --------------------------------------------------------------------------------------
+# Error handling (RFC 9457 problem documents)
+# --------------------------------------------------------------------------------------
 
 
 def problem(response: Any, status: int) -> dict[str, Any]:
@@ -433,6 +468,11 @@ def test_the_published_schema_offers_only_the_problem_media_type(
         content = responses[status]["content"]
         assert list(content) == ["application/problem+json"]
         assert content["application/problem+json"]["schema"]["$ref"].endswith("/Problem")
+
+
+# --------------------------------------------------------------------------------------
+# Content negotiation (JSON vs. CSV)
+# --------------------------------------------------------------------------------------
 
 
 def csv_rows(response: Any) -> list[list[str]]:
@@ -607,6 +647,11 @@ def test_csv_is_streamed_rather_than_buffered(ingested_client: TestClient) -> No
     assert len(csv_rows(response)) == MAX_PAGE_SIZE + 1
 
 
+# --------------------------------------------------------------------------------------
+# Radius (geospatial) search
+# --------------------------------------------------------------------------------------
+
+
 # A circle clipping the northern Vessel's track. The nearest report outside it is 9.6
 # nautical miles from the edge, so no report sits near enough to the boundary for the
 # difference between a sphere and an ellipsoid to move it.
@@ -683,6 +728,11 @@ def test_the_radius_combines_with_the_other_filters(
     assert len(with_box) == 58
     assert 0 < len(with_interval) < len(circle_only)
     assert with_another_vessel == []  # the circle holds no report of that Vessel
+
+
+# --------------------------------------------------------------------------------------
+# Rate limiting and request logging
+# --------------------------------------------------------------------------------------
 
 
 RATE_LIMIT = 10

@@ -22,6 +22,11 @@ Stream = Callable[..., Iterator[Mapping[str, Any]]]
 FEED_SIZE = 2696
 
 
+# --------------------------------------------------------------------------------------
+# Whole-feed ingest
+# --------------------------------------------------------------------------------------
+
+
 def test_the_whole_feed_reaches_the_datastore(
     store: PositionReportStore,
     dead_letters: RecordingDeadLetters,
@@ -45,6 +50,11 @@ def test_replaying_the_feed_writes_nothing_new(
 
     assert result.written == 0
     assert store.count() == FEED_SIZE
+
+
+# --------------------------------------------------------------------------------------
+# Normalisation and retention
+# --------------------------------------------------------------------------------------
 
 
 def test_ais_wire_encodings_are_normalised_on_write(
@@ -82,6 +92,11 @@ def test_conflicting_reports_are_both_retained(
     assert first.mmsi == second.mmsi
     assert first.reported_at == second.reported_at
     assert (first.latitude, first.longitude) != (second.latitude, second.longitude)
+
+
+# --------------------------------------------------------------------------------------
+# Rejection
+# --------------------------------------------------------------------------------------
 
 
 def test_an_invalid_report_is_rejected_rather_than_written(
@@ -159,6 +174,11 @@ def test_the_supplied_feed_alone_is_rejected_nowhere(
 
     assert (result.written, result.rejected) == (FEED_SIZE, 0)
     assert dead_letters.sent == []
+
+
+# --------------------------------------------------------------------------------------
+# Crash recovery (ADR-0004)
+# --------------------------------------------------------------------------------------
 
 
 def test_a_batch_lost_to_a_crash_comes_back_on_replay(
