@@ -10,3 +10,7 @@ htmlcov/
 .env
 Backend Engineer - Vessel Tracking Pipeline _ Kpler.pdf
 .ipynb_checkpoints/
+
+# Personal notes on parts of the codebase I'm still getting familiar with. Not meant
+# for the repo — just my own scratch understanding as I go.
+learnings/

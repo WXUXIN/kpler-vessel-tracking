@@ -19,9 +19,23 @@ CREATE EXTENSION IF NOT EXISTS postgis;
 
 [PostGIS](https://postgis.net/) adds the spatial types, functions, and index support
 this schema depends on: the `geography` type, `ST_MakePoint`/`ST_SetSRID`, `ST_DWithin`,
-and GiST indexing over geographic data. See
-[ADR-0003](../docs/adr/0003-postgresql-with-postgis-as-the-datastore.md) for why
-PostgreSQL+PostGIS was chosen over ClickHouse, Elasticsearch, and TimescaleDB.
+and GiST indexing over geographic data.
+
+### Why this engine, at the schema level
+
+Full trade-off analysis is in
+[ADR-0003](../docs/adr/0003-postgresql-with-postgis-as-the-datastore.md); the part that
+bears directly on *this file* is what each alternative would have cost the schema
+itself:
+
+| Alternative | What this schema would lose without it |
+|---|---|
+| **ClickHouse** | No synchronous `PRIMARY KEY` / `ON CONFLICT` — `report_id` uniqueness (line 10) would only be enforced eventually, by a background merge, not by the write itself. |
+| **Elasticsearch** | No generated column mechanism, no GiST index — the `position` column (below) and its spatial index have no equivalent; geospatial filtering would need a different indexing model entirely (`geo_point` mapping at index-creation time, not a computed column). |
+| **TimescaleDB** | Nothing lost — it's a PostgreSQL extension, so this schema would be unchanged. The only difference would be declaring `position_report` as a hypertable, which isn't worth it at 2,696 rows spanning 18 hours (see ADR-0003). |
+
+The two schema features that specifically required PostGIS rather than plain PostgreSQL
+are the generated `geography` column and its GiST index, both described below.
 
 ## Table: `position_report`
 

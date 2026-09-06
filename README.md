@@ -140,18 +140,39 @@ that synchronously with `ON CONFLICT (report_id) DO NOTHING`. PostGIS then makes
 metrically correct radius filter a small feature rather than a project. Recorded as
 [ADR-0003](docs/adr/0003-postgresql-with-postgis-as-the-datastore.md).
 
+| Datastore | Idempotent write | Consistency model | Geospatial support | Verdict |
+|---|---|---|---|---|
+| **PostgreSQL + PostGIS** | Synchronous — `ON CONFLICT` rejects a duplicate inside the write itself | Full ACID — a commit is immediately visible everywhere | OGC-compliant `geometry`/`geography`, GiST index, spheroid-accurate `ST_DWithin` | **Chosen** |
+| **ClickHouse** | Eventual — see below | Dedup only after a background merge, unless every read pays `FINAL` | `pointInPolygon`, H3; less complete than PostGIS | Rejected — strongest alternative |
+| **Elasticsearch** | Synchronous per document `_id` | Near-real-time, not immediate — see below | `geo_point`/`geo_shape`, strong for distance/bbox | Rejected |
+| **TimescaleDB** | Same as PostgreSQL (it's the same engine) | Same as PostgreSQL | Full PostGIS compatibility | Rejected *at this scale*, not in principle |
+
 **ClickHouse** was the strongest alternative and is the better fit for production AIS
-volumes, but it has no synchronous unique constraint: `ReplacingMergeTree` deduplicates
-eventually, and forcing consistency with `FINAL` on every read is a permanent cost.
-A store that cannot express the identity model would undermine the delivery guarantee in
-[ADR-0004](docs/adr/0004-effectively-once-ingest-via-at-least-once-delivery.md).
+volumes, but it has no synchronous unique constraint. `ReplacingMergeTree` only collapses
+rows sharing a sort key when a background merge happens to run — a query issued moments
+after an insert can legitimately see the same Report ID twice, because nothing has merged
+them yet. `FINAL` forces that merge at query time instead, but it's not a one-time fix:
+it makes the engine redo the merge work on every single read from then on, forever.
+A store that cannot express the identity model synchronously would undermine the delivery
+guarantee in
+[ADR-0004](docs/adr/0004-effectively-once-ingest-via-at-least-once-delivery.md), which
+depends on a duplicate being rejected at write time, not eventually.
 
-**Elasticsearch** gives idempotency through document `_id` and strong geospatial support,
-but is a poor canonical store for exact numeric filtering and CSV export.
+**Elasticsearch** gives idempotency through document `_id` — re-indexing the same `_id`
+overwrites rather than duplicates, and unlike ClickHouse that part is genuinely
+synchronous. What isn't synchronous is *read-your-write*: a document isn't guaranteed
+searchable until the next index refresh (default ~1 second later), so "written" and
+"queryable" are two different moments. It also has strong geospatial support, but its
+query model is built for relevance-ranked search, not the exact numeric filtering and
+streamed CSV export this API needs — a poor canonical store for this shape of data.
 
-**TimescaleDB** was rejected on scale grounds only. A hypertable over 2,696 rows is
-ceremony, and the time-partitioning argument is better made in prose than performed on a
-Feed too small to need it.
+**TimescaleDB** was rejected on scale grounds only, and specifically at this dataset's
+scale, not as a technology. It's a PostgreSQL extension — same SQL, same ACID
+guarantees, same PostGIS support — so adopting it later is a migration, not a rewrite.
+Its hypertable feature auto-partitions a table into time-bounded chunks and skips chunks
+a query's time filter can't match. Over 2,696 rows spanning 18 hours, every row lands in
+one chunk regardless of chunk size, so there's nothing to skip: the time-partitioning
+argument is better made in prose than performed on a Feed too small to need it.
 
 ### The data model against the query patterns
 
