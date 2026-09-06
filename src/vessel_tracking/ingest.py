@@ -129,7 +129,7 @@ class BatchWriter:
             # dead-lettered (ADR-0004), so nothing broader is caught.
             self.reject(message, invalid.reason)
             return 0
-        self._batch.append(report)
+        self._batch.append(report) # simply append to the batch, not yet written to the store
         if len(self._batch) >= self._batch_size:
             return self.flush()
         return 0
@@ -138,7 +138,7 @@ class BatchWriter:
         """Write the pending batch in one transaction. Returns rows added by this call."""
         if not self._batch:
             return 0
-        added = self._write(self._batch)
+        added = self._write(self._batch) # write the batch to the store, handling transient failures and unstorable reports
         self._batch = []
         self._written += added
         return added
@@ -158,6 +158,8 @@ class BatchWriter:
             try:
                 return self._store.insert_many(batch)
             except UnstorableReport:
+                # We try and find the one row that the datastore will not have, so it does not cost the other 499 their place. 
+                # The batch is written in a single transaction, so a refusal rolls the whole thing back and everything good in it is written again here.
                 if len(batch) == 1:
                     raise
                 return self._write_separately(batch)
@@ -189,10 +191,10 @@ class BatchWriter:
         written = 0
         for report in batch:
             try:
-                written += self._write([report])
+                written += self._write([report]) # for each report, attempt to write it as a single-item batch
             except UnstorableReport as unstorable:
-                # The raw message is long gone - it was decoded to get this far - so
-                # what reaches the topic is the decoded report and the refusal.
+                # This is a poison message in the sense of ADR-0004: dead-lettered and counted, never
+                # retried. Transient failures are a different class entirely and never raise this.
                 self.reject(asdict(report), f"the datastore refused it: {unstorable}")
         return written
 

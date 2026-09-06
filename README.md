@@ -57,6 +57,12 @@ curl 'http://localhost:8000/v1/position-reports?mmsi=311486000&limit=2'
 curl 'http://localhost:8000/v1/position-reports?format=csv&limit=2'
 ```
 
+Once the feed has been streamed in, **[`http://localhost:8000/ui/`](http://localhost:8000/ui/)**
+serves a small map-based front-end over the same API — vessel tracks, radius search, CSV
+download, and the rate limiter and error responses made visible, without writing a single
+`curl` command. It's a demo surface, not a new endpoint: same origin as the API, no
+separate service to run.
+
 The supplied feed contains no invalid records, so the rejection path needs messages made
 for the purpose:
 

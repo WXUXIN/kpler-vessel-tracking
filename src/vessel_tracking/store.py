@@ -208,7 +208,7 @@ class PositionReportStore:
         ]
         try:
             with self._pool.connection() as conn, conn.cursor() as cur:
-                cur.executemany(_INSERT, rows)
+                cur.executemany(_INSERT, rows) # execute the insert statement for each row in the batch
                 return cur.rowcount
         except psycopg.OperationalError as failure:
             # PoolTimeout is one of these: the datastore is out of reach either way.
