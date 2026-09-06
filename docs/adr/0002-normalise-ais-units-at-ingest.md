@@ -10,7 +10,7 @@ wire encoding.
 
 The wire format is lost: a stored report cannot be replayed byte-identically to what the
 producer published. That is acceptable because the feed file is retained as the source of
-truth, but it means round-tripping through the datastore is not lossless.
+truth, but it means round-tripping (raw feed message → written to Postgres → read back out) through the datastore is not lossless.
 
 Rate of Turn's column type comes from the AIS specification (signed, -128..127) rather than
 from the supplied data, which never populates it. A non-nullable column would reject the

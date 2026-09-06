@@ -14,12 +14,18 @@ where the vessel truly was. That distinction drives most of what follows.
 - **[docs/adr/](docs/adr/)** — the seven architecture decision records.
 - **[docs/api.md](docs/api.md)** — the endpoint reference: every parameter, the response
   shape, content negotiation and every error.
+- **[docs/architecture.md](docs/architecture.md)** — the important classes in plain
+  language, and how they hand work to each other, end to end.
+- **[docs/class-reference.md](docs/class-reference.md)** — every class's methods, one
+  table each, one line per method.
 - **[docs/implementation-log.md](docs/implementation-log.md)** — what each ticket
   shipped, what the reviews caught, and what was deferred on purpose.
 - **[docs/dataset-observations.md](docs/dataset-observations.md)** — the full dataset
   analysis, regenerable from the feed.
 - **[docs/test-catalog.md](docs/test-catalog.md)** — every test in the suite, grouped by
   file and by what it proves.
+- **[db/SCHEMA.md](db/SCHEMA.md)** — every table, column and index, and why each is
+  shaped the way it is.
 
 ---
 
@@ -156,18 +162,26 @@ about position — are both kept, because the pipeline's job is to record the fe
 faithfully and leave adjudication to callers who know their own tolerance for ambiguity
 ([ADR-0001](docs/adr/0001-position-reports-are-an-append-only-observation-log.md)).
 
-| Column | Type | Why |
-| --- | --- | --- |
-| `report_id` | `bigint` primary key | The feed's `stationId`. The idempotency mechanism, not merely an access path |
-| `mmsi` | `integer` | Nine digits fit in four bytes |
-| `reported_at` | `timestamptz` | Converted from epoch seconds, so time filtering and indexing work naturally |
-| `nav_status` | `smallint` | **Navigational Status**: self-declared, so only as reliable as the crew setting it |
-| `speed_knots` | `numeric(4,1)` | Wire value divided by ten; the 1023 sentinel becomes null, not 102.3 knots |
-| `course_degrees` | `smallint` | **Course**, over the ground. Whole degrees in this Feed, not decidegrees |
-| `heading_degrees` | `smallint` null | **Heading**, where the bow points. 511 is the AIS sentinel for unavailable |
-| `rate_of_turn` | `smallint` null | Empty in every supplied record; the type comes from the AIS specification, not the data |
-| `latitude`, `longitude` | `double precision` | Canonical |
-| `position` | `geography(Point,4326)` | **Generated** from the coordinates, so the two cannot drift |
+One real row, report 81, run through the whole table — the same row the test suite
+uses as its running example:
+
+| Column | Type | Example | Why |
+| --- | --- | --- | --- |
+| `report_id` | `bigint` primary key | `81` | The feed's `stationId`. The idempotency mechanism, not merely an access path |
+| `mmsi` | `integer` | `247039300` | Nine digits fit in four bytes |
+| `reported_at` | `timestamptz` | `2013-07-01 13:06:00+00` | Converted from epoch seconds, so time filtering and indexing work naturally |
+| `nav_status` | `smallint` | `0` (under way, engine) | **Navigational Status**: self-declared, so only as reliable as the crew setting it |
+| `speed_knots` | `numeric(4,1)` | `18.0` | Wire value divided by ten; the 1023 sentinel becomes null, not 102.3 knots |
+| `course_degrees` | `smallint` | `144` | **Course**, over the ground. Whole degrees in this Feed, not decidegrees |
+| `heading_degrees` | `smallint` null | `144` | **Heading**, where the bow points. 511 is the AIS sentinel for unavailable |
+| `rate_of_turn` | `smallint` null | `NULL` | Empty in every supplied record; the type comes from the AIS specification, not the data |
+| `latitude`, `longitude` | `double precision` | `42.75178`, `15.4415` | Canonical |
+| `position` | `geography(Point,4326)` | `0101000020E6100000355EBA490CE22E40B8E4B8533A604540` | **Generated** from the coordinates, so the two cannot drift |
+
+`position`'s example is what a client actually receives with no cast applied: raw EWKB
+hex — byte order, geometry type, SRID, then longitude and latitude as two little-endian
+doubles. `SELECT ST_AsText(position) ...` turns the same value into
+`POINT(15.4415 42.75178)`.
 
 Units are normalised on write ([ADR-0002](docs/adr/0002-normalise-ais-units-at-ingest.md)),
 so no downstream reader has to know that Speed crosses the wire ten times too large.
@@ -393,3 +407,91 @@ Deliberately deferred, so that conscious scoping is not mistaken for oversight.
   everything up to the first row still gets a problem document.
 - **`OperationalError` covers a bad password as well as a dead database**, so a
   misconfigured DSN retries forever rather than failing fast. Loud, but wrong-shaped.
+
+---
+
+## Scaling to production volumes
+
+This system was built and tuned against the supplied 2,696-record sample. Several
+sections above already flag a specific point where that sample's scale drove a decision
+that production AIS volumes — billions of Position Reports, tens of thousands of
+Vessels, a continuous 24/7 stream — would not: ADR-0003's storage crossover, the
+unapplied monthly partitioning, the three-vessel partition skew in ADR-0004. This section
+draws those together with the questions not yet touched above.
+
+### Ingest
+
+- **Kafka partition key.** MMSI keying (ADR-0004) produces three hot partitions on this
+  sample because there are three Vessels. At production cardinality — tens of thousands
+  of MMSIs — the same key distributes naturally, but partition count and consumer group
+  size stop being defaults and become capacity planning: too few partitions caps
+  consumer parallelism regardless of how many consumer processes are run.
+- **One consumer, one batch writer.** The pipeline today is a single consumer process
+  draining one `BatchWriter` serially. Production throughput needs horizontal consumer
+  scaling — multiple processes sharing a consumer group, each with its own `BatchWriter`
+  and dead-letter producer, coordinated by Kafka's own partition assignment.
+- **Batch size is tuned for a small feed.** 500 records / 1 second bounds today's
+  ingest_batch_size and ingest_batch_seconds. At volume this becomes a real trade rather
+  than a comfortable default: a larger batch amortises `fsync` cost further but replays
+  more on a crash; the right value depends on measured write latency and an accepted
+  replay window, not on this feed's size.
+- **Backfill and late data.** The pipeline assumes one forward replay of a static file.
+  Continuous ingest needs a defined policy for late-arriving reports and for running
+  ingest against more than one upstream feed at once, neither of which this design
+  addresses.
+
+### Storage
+
+- **Monthly `RANGE` partitioning on `reported_at`**, already described and deliberately
+  not applied, becomes necessary once data spans months rather than hours: it bounds the
+  working set for indexes and `VACUUM`, and turns data retention into dropping a
+  partition instead of a `DELETE` that has to be indexed around.
+- **The Timescale/ClickHouse crossover** (ADR-0003) arrives around the low hundreds of
+  millions of reports, when the working set stops fitting in memory. A TimescaleDB
+  hypertable keeps today's SQL and PostGIS surface, including `ST_DWithin`, with the
+  schema in this file mostly intact. ClickHouse trades that surface for raw ingest
+  throughput and would need the radius predicate reimplemented without PostGIS —
+  geohash or H3 bucketing plus a haversine filter is the usual substitute.
+- **The composite index's calculus changes with cardinality.** `EXPLAIN ANALYZE` today
+  shows an MMSI-only query preferring a sequential scan, because one of three Vessels is
+  36% of the table. At real cardinality — one Vessel among tens of thousands — that same
+  query becomes highly selective, and the planner should be expected to use the index
+  unconditionally rather than fall back to a scan.
+- **A migration framework**, absent by design (ADR-0005) while the schema is applied
+  once to an empty database, is the first thing a populated production database needs
+  before any further schema change can ship without downtime.
+
+### Querying at scale
+
+- **No "current position" answer exists.** Conflicting Reports are kept, not resolved,
+  so a fleet-overview or live-map query has no faster path today than scanning and
+  sorting a Vessel's whole history. At volume that wants a materialised view or a
+  separate current-position table, maintained incrementally — e.g. a consumer-side
+  upsert keyed by `mmsi` that keeps only the newest Report ID — rather than computed
+  per request.
+- **One database serves both the write path and the read path.** The consumer and the
+  API share one PostgreSQL instance today. At volume, ingest and query contend for the
+  same I/O and connection budget; a read replica (or a distributed layer's read nodes)
+  separates them so a slow export cannot slow ingest and vice versa.
+- **Connection pooling stops scaling linearly.** The API's own pool is five connections
+  per process. Running many API instances behind a load balancer multiplies that
+  directly against PostgreSQL's connection limit; a pooler such as PgBouncer in front of
+  the database is the usual fix once instance count is no longer one.
+- **CSV export holds a live cursor for the request's whole duration** (noted above as a
+  trade-off already). At high concurrency and large export sizes, a queued or
+  asynchronous export — generate to object storage, hand back a link — avoids holding
+  many simultaneous server-side cursors against the same connection pool.
+
+### Rate limiting and observability
+
+- **Redis is already the shared source of truth** — ADR-0007 rejects a per-process
+  fallback counter precisely because it would let a multi-instance fleet exceed the
+  configured limit. At production scale, Redis itself needs the same treatment as
+  PostgreSQL: a single container is a single point of failure, so a fleet-scale
+  deployment runs it as a cluster (Redis Cluster or Sentinel) rather than one instance.
+  The fail-open behaviour doesn't change; what changes is how often it's exercised.
+- **Metrics are logs today, not a Prometheus surface** (also noted above). Every
+  production concern in this section — batch backoff triggering, the read replica
+  falling behind, the rate limiter failing open — is only visible today by reading
+  structured logs by hand. A metrics endpoint is the prerequisite for noticing any of
+  the above happening in real time rather than after the fact.

@@ -20,6 +20,12 @@ CREATE TABLE IF NOT EXISTS position_report (
     -- Generated rather than written, so it cannot drift from the coordinates it is
     -- derived from. Latitude and longitude stay canonical; this is only how the
     -- datastore is asked geographic questions about them.
+
+    -- ST_SetSRID is used to set the SRID (Spatial Reference System Identifier) of the point to 4326
+    -- which corresponds to the WGS 84 coordinate system (the standard for GPS coordinates). This ensures that the point is correctly interpreted in a geographic context.
+    
+    -- ST_MakePoint creates a point geometry from the longitude and latitude values. 
+    -- The resulting geometry is then cast to geography type, which allows for accurate distance calculations on the Earth's surface.
     position        geography(Point, 4326) GENERATED ALWAYS AS
                         (ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography)
                         STORED
