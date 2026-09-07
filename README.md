@@ -18,6 +18,8 @@ where the vessel truly was. That distinction drives most of what follows.
   language, and how they hand work to each other, end to end.
 - **[docs/class-reference.md](docs/class-reference.md)** — every class's methods, one
   table each, one line per method.
+- **[docs/consumer-flow.md](docs/consumer-flow.md)** — the consumer's main loop, flow
+  diagrammed: the two ways a checkpoint fires, and why offsets commit last.
 - **[docs/implementation-log.md](docs/implementation-log.md)** — what each ticket
   shipped, what the reviews caught, and what was deferred on purpose.
 - **[docs/dataset-observations.md](docs/dataset-observations.md)** — the full dataset

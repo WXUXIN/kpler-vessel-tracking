@@ -193,6 +193,7 @@ class Traffic:
         if _is_unlimited(scope["path"]):
             return None
         try:
+            # This checks with the limiter, which is a shared resource that is opened for the life of the application.
             return await self._limits.check(client)
         except Exception as unreachable:
             log.error(
@@ -374,8 +375,13 @@ class PositionReportPage(BaseModel):
         Asking the datastore for the extra report is what lets the cursor be null
         exactly when the collection is exhausted: a full page and a final page are
         otherwise the same thing, and the caller is sent back for an empty one.
+
+        Eg. limit = 5, store.list_reports(6, filters) returns [100, 101, 102, 103, 104, 105]
+        Then PositionReportPage.of([100, 101, 102, 103, 104, 105], 5) returns
+        PositionReportPage(items=[100, 101, 102, 103, 104], next_cursor=105)
+
         """
-        page = reports[:limit]
+        page = reports[:limit] # extra report is only to see if there is a next page
         return cls(
             items=[PositionReportResource.of(report) for report in page],
             next_cursor=page[-1].report_id if len(reports) > limit else None,
@@ -625,12 +631,20 @@ def create_app(
         lifespan=lifespan,
     )
 
+    # The middleware is the only place that sees every request, so it is the only place
+    # that can enforce a limit and record the traffic. The limiter is a shared resource
+    # that is opened for the life of the application, so it is passed in rather than
+    # created here. The request log is also shared, so it is passed in rather than
+    # created here.
     app.add_middleware(Traffic, limits=limiter, requests=requests)
 
     # A demo of the endpoints above, not an endpoint itself. See UNLIMITED_PREFIX.
     app.mount("/ui", StaticFiles(directory="static", html=True), name="ui")
 
-    @app.exception_handler(RequestValidationError)
+    # For when a query parameter is wrong, or missing a required one, or a bound is out of range.
+    # Error is raised from the query model which is ReportQuery, which is validated by FastAPI and Pydantic. 
+    # The exception handler here converts the validation error into a Problem document.
+    @app.exception_handler(RequestValidationError) 
     async def invalid_parameters(
         request: Request, failure: RequestValidationError
     ) -> JSONResponse:
@@ -687,10 +701,7 @@ def create_app(
             )
         )
 
-    # The resource is a Position Report, not a position: it records what arrived from
-    # AIS, never where a Vessel was. CONTEXT.md puts "position" on the avoid list for
-    # exactly that reason, so the conventional-looking /v1/positions would assert
-    # something the data cannot support.
+    # After this, Traffic's watch wrapper is watching those exact bytes go past on their way out.
     @app.get(
         "/v1/position-reports",
         response_model=PositionReportPage,
@@ -711,14 +722,24 @@ def create_app(
         },
     )
     def list_position_reports(
-        request: Request, query: Annotated[ReportQuery, Query()]
+        request: Request, query: Annotated[ReportQuery, Query()] # Query params are gathered into a ReportQuery object => validated and converted to a ReportFilter for the datastore
     ) -> PositionReportPage | StreamingResponse:
+        """List Position Reports, with filters and pagination.
+
+        The query is passed to the datastore, which returns a
+        page of Position Reports. The page is returned as JSON or CSV, depending on the
+        Accept header or the format query parameter.
+        """
+        
         store = request.app.state.store
+
         if _wants_csv(request.headers.get("accept", ""), query.format):
             return _csv_response(store, query)
-        # One report more than the page, so that "is there another page" is answered by
-        # the datastore rather than guessed from a page that happens to look full.
+        
+        # Runs the query with one more 
         reports = store.list_reports(query.limit + 1, query.filters())
+
+        # with list of PositionReport, return a PositionReportPage with the items and next_cursor
         return PositionReportPage.of(reports, query.limit)
 
     def problem_only_openapi() -> dict[str, Any]:

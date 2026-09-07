@@ -175,9 +175,13 @@ class PositionReportStore:
         """The one statement both the paged read and the export are built from."""
         fragments, params = filters.conditions()
         where = f" WHERE {' AND '.join(fragments)}" if fragments else ""
+
+        # The order here is the trustworthy sequence (ADR-0006): Report ID only ever ascends, so a
+        # caller that paginates through it sees every report once and only once, even if
+        # new reports arrive while the pagination is in progress.
         return (
             f"SELECT {_COLUMNS} FROM position_report{where}"
-            " ORDER BY report_id LIMIT %s",
+            " ORDER BY report_id LIMIT %s", 
             params,
         )
 
@@ -278,6 +282,9 @@ class PositionReportStore:
         """
         statement, params = self._select(filters)
         with self._pool.connection() as conn:
+
+            # cur here represents one query's execution and results
+            # class_row builds PositionReport instances from each row, so the caller gets a list of them
             with conn.cursor(row_factory=class_row(PositionReport)) as cur:
                 cur.execute(statement, (*params, limit))
-                return cur.fetchall()
+                return cur.fetchall() # we want all the rows at once, not a cursor, because this is a paged read rather than an export

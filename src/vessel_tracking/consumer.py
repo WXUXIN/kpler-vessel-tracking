@@ -113,6 +113,8 @@ def main() -> None:
     consumer.subscribe([settings.kafka_topic])
 
     dead_letters = KafkaDeadLetters(
+        # Producer just to publish Rejected Reports to the dead-letter topic, so the consumer can keep going. 
+        # The producer is not used for the feed, which is read from the topic by this consumer.
         Producer(
             {
                 "bootstrap.servers": settings.kafka_bootstrap_servers,
@@ -161,17 +163,19 @@ def main() -> None:
         """
         nonlocal uncommitted, deadline, reported
         writer.flush()
-        undelivered = dead_letters.flush()
-        if uncommitted and not undelivered:
+        undelivered = dead_letters.flush() # undelivered is the number of Rejected Reports that were not delivered to the dead-letter topic
+
+        if uncommitted and not undelivered: # only commit offsets if there are no undelivered Rejected Reports, because committing offsets would mean losing those Rejected Reports
             consumer.commit(asynchronous=False)
             uncommitted = False
+
         # Reported against the totals rather than against this flush: a batch that
         # filled on the size bound was already written from inside add().
         totals = (writer.written, writer.rejected)
         if totals != reported:
-            progress()
+            progress() # print progress only if the totals have changed since the last report
             reported = totals
-        deadline = time.monotonic() + settings.ingest_batch_seconds
+        deadline = time.monotonic() + settings.ingest_batch_seconds # reset the deadline for the next flush, because a flush just happened
 
     def handle(payload: bytes) -> bool:
         """Decode and accumulate one record. Returns whether a batch reached the store."""
@@ -189,7 +193,7 @@ def main() -> None:
 
     try:
         while _running:
-            message = consumer.poll(POLL_SECONDS)
+            message = consumer.poll(POLL_SECONDS) # the duration here is the maximum time to wait for a message before returning None, not the time to wait for a batch to fill
             wrote = False
             if message is not None:
                 error = message.error()
@@ -197,15 +201,20 @@ def main() -> None:
                     last_record = time.monotonic()
                     uncommitted = True
                     payload = message.value()
+
                     if payload is not None:
                         wrote = handle(payload)
+
                 elif error.code() != KafkaError._PARTITION_EOF:
                     log.error(
                         json.dumps({"event": "broker_error", "detail": str(error)})
                     )
             now = time.monotonic()
-            # The size bound fires the moment a batch fills; the time bound catches
-            # everything else, including a run of records that were all rejected.
+
+            # We will do a checkpoint to commit offsets here if:
+            # 1. A batch was written to the store (wrote is True) this happens when the batch size limit is reached and the batch is flushed to the store
+            # OR
+            # 2. The time since the last checkpoint has exceeded the ingest_batch_seconds limit (now >= deadline)
             if wrote or now >= deadline:
                 checkpoint()
             if (

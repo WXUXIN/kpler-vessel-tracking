@@ -152,6 +152,9 @@ class BatchWriter:
         oversight - availability is not traded for data loss (ADR-0004). The exception
         is shutdown, where the batch is left unwritten: its offsets never moved, so the
         records are still on the topic for the next run to collect.
+
+        Returns the number of rows written, which may be less than the batch size if one row was refused. 
+        The batch is written in a single transaction, so a refusal rolls the whole thing
         """
         attempt = 0
         while True:

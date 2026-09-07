@@ -39,7 +39,10 @@ ais.position-reports.dead-letter")]
 publishes each message to Kafka unchanged. `Consumer.main` reads messages back off
 Kafka, one at a time, and hands each to `BatchWriter.add`, which validates it, converts
 its units, and piles reports up until 500 are collected or one second passes — only
-then does `flush` actually write to Postgres.
+then does `flush` actually write to Postgres. `Consumer.main`'s own loop — what actually
+decides when to flush and commit, and in what order — is diagrammed in detail in
+[consumer-flow.md](consumer-flow.md); it's the single hardest function in the codebase
+to follow from the source alone.
 
 ### The classes in this journey
 
