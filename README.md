@@ -293,44 +293,6 @@ would return **714**.
 
 The `geography` column is generated from the canonical coordinates rather than written,
 so the two cannot drift, and the GiST index over it is used at every radius measured.
-
-### Polygon — sketched, not built
-
-Polygon filtering is deliberately out of scope; radius covers the geospatial requirement.
-What it would take:
-
-**Storage and indexing** need nothing new. The same generated `geography` column and its
-GiST index serve `ST_Covers(polygon, position)` exactly as they serve `ST_DWithin`. The
-work is in validation, not storage: a polygon arriving from a caller may be
-self-intersecting, may be wound the wrong way — on a `geography`, ring order decides
-which side of the boundary is "inside", so a reversed ring selects the rest of the planet
-— and may cross the antimeridian, where a naive coordinate-order assumption produces a
-band around the world instead of a shape near it. `ST_IsValid` and an explicit winding
-normalisation would have to run before the predicate, and a vertex cap would be needed to
-stop one request planning a scan over a thousand-vertex outline.
-
-**The API contract is the real question**, and it is a request-shape question rather than
-a geometry one. A polygon does not fit comfortably into a query string:
-
-- *Repeated coordinate parameters* keep every filter uniform and individually
-  nameable in a validation error, which is how the bounding box works today. But order
-  carries meaning for a polygon and query parameters do not guarantee it, so the contract
-  would rest on an ordering the transport does not promise.
-- *One encoded parameter* — WKT or GeoJSON in a single value — preserves order and is
-  unambiguous, at the cost of URLs long enough to meet proxy limits, and of an error that
-  can only say "the polygon is invalid" rather than naming the bound at fault, which is
-  the property the four separate box bounds exist to keep.
-- *A request body on a POST* removes both problems and creates a third: the operation is
-  a read, and making it a POST costs cacheability and makes it invisible to the ordinary
-  HTTP machinery a caller expects to work. `GET` with a body is worse still — permitted
-  by the specification, honoured by very little.
-
-There is no clean answer, which is exactly why it is worth writing down rather than
-guessing at. The shape of the decision is: a polygon is the first filter whose value is
-structured, and this API's error contract is built on being able to name the single
-parameter that was wrong. Whichever encoding is chosen, that property is what is being
-traded away.
-
 ---
 
 ## Dataset observations
@@ -471,16 +433,14 @@ draws those together with the questions not yet touched above.
 
 ### Storage
 
-- **Monthly `RANGE` partitioning on `reported_at`**, already described and deliberately
-  not applied, becomes necessary once data spans months rather than hours: it bounds the
-  working set for indexes and `VACUUM`, and turns data retention into dropping a
+- **Monthly `RANGE` partitioning on `reported_at`** becomes necessary once data spans months rather than hours: it bounds the
+  working set for indexes, and turns data retention into dropping a
   partition instead of a `DELETE` that has to be indexed around.
 - **The Timescale/ClickHouse crossover** (ADR-0003) arrives around the low hundreds of
   millions of reports, when the working set stops fitting in memory. A TimescaleDB
   hypertable keeps today's SQL and PostGIS surface, including `ST_DWithin`, with the
   schema in this file mostly intact. ClickHouse trades that surface for raw ingest
-  throughput and would need the radius predicate reimplemented without PostGIS —
-  geohash or H3 bucketing plus a haversine filter is the usual substitute.
+  throughput and would need the radius predicate reimplemented without PostGIS.
 - **The composite index's calculus changes with cardinality.** `EXPLAIN ANALYZE` today
   shows an MMSI-only query preferring a sequential scan, because one of three Vessels is
   36% of the table. At real cardinality — one Vessel among tens of thousands — that same
@@ -502,14 +462,6 @@ draws those together with the questions not yet touched above.
   API share one PostgreSQL instance today. At volume, ingest and query contend for the
   same I/O and connection budget; a read replica (or a distributed layer's read nodes)
   separates them so a slow export cannot slow ingest and vice versa.
-- **Connection pooling stops scaling linearly.** The API's own pool is five connections
-  per process. Running many API instances behind a load balancer multiplies that
-  directly against PostgreSQL's connection limit; a pooler such as PgBouncer in front of
-  the database is the usual fix once instance count is no longer one.
-- **CSV export holds a live cursor for the request's whole duration** (noted above as a
-  trade-off already). At high concurrency and large export sizes, a queued or
-  asynchronous export — generate to object storage, hand back a link — avoids holding
-  many simultaneous server-side cursors against the same connection pool.
 
 ### Rate limiting and observability
 
@@ -518,7 +470,6 @@ draws those together with the questions not yet touched above.
   configured limit. At production scale, Redis itself needs the same treatment as
   PostgreSQL: a single container is a single point of failure, so a fleet-scale
   deployment runs it as a cluster (Redis Cluster or Sentinel) rather than one instance.
-  The fail-open behaviour doesn't change; what changes is how often it's exercised.
 - **Metrics are logs today, not a Prometheus surface** (also noted above). Every
   production concern in this section — batch backoff triggering, the read replica
   falling behind, the rate limiter failing open — is only visible today by reading

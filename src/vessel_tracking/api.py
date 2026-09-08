@@ -228,6 +228,7 @@ class Traffic:
             else:
                 await _too_many_requests(scope, decision)(scope, receive, watch)
         finally:
+            # Log the request after the response is on its way out
             self._requests.record(
                 scope["app"].state.store,
                 RequestRecord(
